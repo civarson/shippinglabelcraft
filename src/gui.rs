@@ -33,6 +33,25 @@ struct Prefs {
     cups_extra: String,
     /// 0 = light, 1 = follow system, 2 = dark
     theme: usize,
+    light_theme: String,
+    dark_theme: String,
+    ui_scale: f32,
+    reduce_motion: bool,
+    offset_x_mm: f32,
+    offset_y_mm: f32,
+    vector_render: bool,
+    auto_crop: bool,
+    straighten: bool,
+    auto_rotate: bool,
+    bolder: bool,
+    thicker_bars: bool,
+    ocr: bool,
+    ocr_confidence: f32,
+    ocr_review: bool,
+    copies: u32,
+    auto_print: bool,
+    archive: bool,
+    archive_dir: String,
 }
 
 impl Default for Prefs {
@@ -49,6 +68,25 @@ impl Default for Prefs {
             show_outlines: true,
             cups_extra: String::new(),
             theme: 1,
+            light_theme: theme::PAPER.name.into(),
+            dark_theme: theme::NIGHT.name.into(),
+            ui_scale: 1.0,
+            reduce_motion: false,
+            offset_x_mm: 0.0,
+            offset_y_mm: 0.0,
+            vector_render: true,
+            auto_crop: true,
+            straighten: true,
+            auto_rotate: true,
+            bolder: false,
+            thicker_bars: false,
+            ocr: false,
+            ocr_confidence: 0.9,
+            ocr_review: true,
+            copies: 1,
+            auto_print: false,
+            archive: false,
+            archive_dir: String::new(),
         }
     }
 }
@@ -89,6 +127,13 @@ pub struct App {
     drag_start: Option<Pos2>,
     toast: Option<Toast>,
     settings_open: bool,
+    settings_page: usize,
+    before_tex: Option<TextureHandle>,
+    ocr_reviewed: bool,
+    comparing: bool,
+    /// A freshly loaded label that may be auto-printed once processed.
+    auto_print_pending: bool,
+    scroll_to_text: bool,
 }
 
 impl App {
@@ -96,7 +141,6 @@ impl App {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         theme::install(&cc.egui_ctx);
         let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
-        apply_theme(&cc.egui_ctx, prefs.theme);
         let (tx, rx) = mpsc::channel();
         let printers = print::list_printers();
         let mut app = Self {
@@ -116,7 +160,19 @@ impl App {
             drag_start: None,
             toast: None,
             settings_open: false,
+            settings_page: 0,
+            before_tex: None,
+            ocr_reviewed: false,
+            comparing: false,
+            auto_print_pending: false,
+            scroll_to_text: false,
         };
+        app.apply_look(&cc.egui_ctx);
+        // Handy for screenshots/docs: open straight onto a settings page.
+        if let Some(page) = std::env::var("LABELCRAFT_OPEN_SETTINGS").ok().and_then(|v| v.parse().ok()) {
+            app.settings_open = true;
+            app.settings_page = page;
+        }
         if app.prefs.printer.is_empty() || !app.printers.contains(&app.prefs.printer) {
             // Prefer anything that looks like the PeriPage, else the system default.
             app.prefs.printer = app
@@ -145,6 +201,39 @@ impl App {
         self.settings.margin_mm = p.margin_mm;
         self.settings.darkness = p.darkness;
         self.settings.regenerate_barcodes = p.regenerate;
+        self.settings.vector_render = p.vector_render;
+        self.settings.auto_crop = p.auto_crop;
+        self.settings.straighten = p.straighten;
+        self.settings.auto_rotate = p.auto_rotate;
+        self.settings.bolder = p.bolder;
+        self.settings.thicker_bars = p.thicker_bars;
+        self.settings.offset_x_mm = p.offset_x_mm;
+        self.settings.offset_y_mm = p.offset_y_mm;
+        self.settings.ocr = p.ocr;
+        self.settings.ocr_settings.min_confidence = p.ocr_confidence;
+    }
+
+    /// Theme palettes, light/dark mode, interface size and motion.
+    fn apply_look(&self, ctx: &egui::Context) {
+        theme::set_palettes(ctx, &self.prefs.light_theme, &self.prefs.dark_theme);
+        apply_theme(ctx, self.prefs.theme);
+        ctx.set_zoom_factor(self.prefs.ui_scale.clamp(0.75, 1.5));
+        let t = if self.prefs.reduce_motion { 0.0 } else { 0.2 };
+        ctx.all_styles_mut(|s| s.animation_time = t);
+    }
+
+    /// Fingerprint of everything that changes the processed label.
+    fn processing_key(&self) -> String {
+        let s = &self.settings;
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            s.dpi, s.width_mm, s.height_mm, s.margin_mm, s.darkness, s.regenerate_barcodes, s.vector_render, s.auto_crop,
+            s.straighten, s.auto_rotate, s.bolder, s.thicker_bars, s.offset_x_mm, s.offset_y_mm, s.ocr, s.ocr_settings.min_confidence
+        )
+    }
+
+    fn review_pending(&self) -> bool {
+        self.prefs.ocr_review && !self.ocr_reviewed && self.output.as_ref().is_some_and(|o| o.before_ocr.is_some())
     }
 
     fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
@@ -164,6 +253,7 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.auto_print_pending = self.prefs.auto_print;
         self.settings.manual_crop = None;
         self.settings.extra_rotation = 0;
         self.settings.page = 0;
@@ -223,8 +313,12 @@ impl App {
                         ..TextureOptions::LINEAR
                     };
                     self.out_tex = Some(ctx.load_texture("label", img, opts));
+                    self.before_tex = output.before_ocr.as_ref().map(|b| ctx.load_texture("label-before", gray_to_color(b), opts));
                     self.output = Some(*output);
                     self.busy = false;
+                    self.ocr_reviewed = false;
+                    self.comparing = false;
+                    self.maybe_auto_print();
                 }
                 Msg::Failed { generation, error } if generation == self.generation => {
                     self.busy = false;
@@ -239,17 +333,62 @@ impl App {
     }
 
     fn do_print(&mut self) {
+        if self.review_pending() {
+            self.toast(ToastKind::Warn, "Check the re-typeset text first");
+            return;
+        }
         let Some(out) = &self.output else { return };
         if self.prefs.printer.is_empty() {
             self.toast(ToastKind::Warn, "Pick a printer first");
             return;
         }
-        match print::print(&self.prefs.printer, &out.bitmap, &self.settings, &self.prefs.cups_extra) {
+        let copies = self.prefs.copies.max(1);
+        match print::print(&self.prefs.printer, &out.bitmap, &self.settings, &self.prefs.cups_extra, copies) {
             Ok(()) => {
                 let p = self.prefs.printer.clone();
-                self.toast(ToastKind::Ok, format!("Sent to {p}"));
+                let what = if copies > 1 { format!("{copies} copies sent to {p}") } else { format!("Sent to {p}") };
+                let archived = self.archive_copy();
+                match archived {
+                    Some(Err(e)) => self.toast(ToastKind::Warn, format!("{what}, but couldn't save a copy: {e}")),
+                    _ => self.toast(ToastKind::Ok, what),
+                }
             }
             Err(e) => self.toast(ToastKind::Error, format!("Couldn't print: {e:#}")),
+        }
+    }
+
+    /// Save a copy of the printed label into the archive folder, if that's switched on.
+    fn archive_copy(&self) -> Option<Result<(), String>> {
+        if !self.prefs.archive || self.prefs.archive_dir.is_empty() {
+            return None;
+        }
+        let out = self.output.as_ref()?;
+        let stem = self
+            .source
+            .as_ref()
+            .and_then(|s| std::path::Path::new(&s.name).file_stem().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "label".into());
+        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let path = std::path::Path::new(&self.prefs.archive_dir).join(format!("{stem}-{secs}.png"));
+        Some(
+            pdfout::label_png(&out.bitmap, self.settings.dpi)
+                .map_err(|e| e.to_string())
+                .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())),
+        )
+    }
+
+    fn maybe_auto_print(&mut self) {
+        if !std::mem::take(&mut self.auto_print_pending) {
+            return;
+        }
+        let Some(out) = &self.output else { return };
+        let all_ok = !out.barcodes.is_empty() && out.barcodes.iter().all(|b| !matches!(b.status, Status::Kept(_)));
+        if !all_ok {
+            self.toast(ToastKind::Warn, "Not printed automatically: not every barcode was verified");
+        } else if self.review_pending() {
+            self.toast(ToastKind::Warn, "Not printed automatically: re-typeset text needs a look first");
+        } else {
+            self.do_print();
         }
     }
 
@@ -293,7 +432,7 @@ impl App {
             p.text(pos2(logo.right() + 11.0, r.center().y + 9.0), Align2::LEFT_CENTER, "Crisp shipping labels, ready to print", theme::body(11.5), t.text_faint);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(4.0);
-                if widgets::icon_button(ui, t, "settings-2", "Label & printer settings", 34.0).clicked() {
+                if widgets::icon_button(ui, t, "settings-2", &format!("Settings ({MOD},)"), 34.0).clicked() {
                     self.settings_open = !self.settings_open;
                 }
                 let mut theme = self.prefs.theme;
@@ -354,8 +493,15 @@ impl App {
                             self.printers = print::list_printers();
                         }
                     });
-                if widgets::primary_button(ui, t, "printer", "Print label", Some(&format!("{MOD}P")), ready).clicked() {
-                    self.do_print();
+                let pending = self.review_pending();
+                let (icon, label) = if pending { ("sparkles", "Check the text first") } else { ("printer", "Print label") };
+                let copies = if self.prefs.copies > 1 { format!("×{}  {MOD}P", self.prefs.copies) } else { format!("{MOD}P") };
+                if widgets::primary_button(ui, t, icon, label, (!pending).then_some(copies.as_str()), ready).clicked() {
+                    if pending {
+                        self.scroll_to_text = true;
+                    } else {
+                        self.do_print();
+                    }
                 }
                 ui.horizontal(|ui| {
                     let half = (ui.available_width() - 8.0) / 2.0;
@@ -427,8 +573,88 @@ impl App {
 
             // ── Barcodes ──
             self.barcode_card(ui, t);
+            // ── Text (OCR) ──
+            if self.prefs.ocr {
+                self.text_card(ui, t);
+            }
             ui.add_space(8.0);
         });
+    }
+
+    fn text_card(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        use crate::ocr::LineStatus;
+        let Some(out) = &self.output else { return };
+        let done = out.ocr.iter().filter(|l| matches!(l.status, LineStatus::Retypeset { .. })).count();
+        let total = out.ocr.len();
+        let pending = self.review_pending();
+        let mut reviewed_click = false;
+        let mut compare = false;
+        if std::mem::take(&mut self.scroll_to_text) {
+            ui.scroll_to_cursor(Some(Align::TOP));
+        }
+        widgets::card(
+            ui,
+            t,
+            "sparkles",
+            "Text",
+            |ui| {
+                if total > 0 {
+                    widgets::badge(ui, &format!("{done} of {total} re-typeset"), t.accent, t.accent_soft);
+                }
+            },
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                if total == 0 {
+                    ui.label(RichText::new("No text lines found to re-typeset.").font(theme::body(12.5)).color(t.text_faint));
+                    return;
+                }
+                if pending {
+                    egui::Frame::new()
+                        .fill(t.warn_soft)
+                        .corner_radius(CornerRadius::same(R_CONTROL))
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new("Compare the redrawn text with the original, especially names, numbers and ZIP codes.")
+                                    .font(theme::body(12.0))
+                                    .color(t.text),
+                            );
+                        });
+                }
+                if out.before_ocr.is_some() {
+                    ui.horizontal(|ui| {
+                        let half = (ui.available_width() - 8.0) / 2.0;
+                        let hold = widgets::ghost_button(ui, t, "refresh-cw", "Hold: original", half, true);
+                        compare = hold.is_pointer_button_down_on();
+                        if pending && widgets::ghost_button(ui, t, "check", "Looks right", half, true).clicked() {
+                            reviewed_click = true;
+                        }
+                    });
+                }
+                for l in &out.ocr {
+                    let (ok, detail) = match &l.status {
+                        LineStatus::Retypeset { barcode_match: true } => (true, "Redrawn · matches a barcode".to_string()),
+                        LineStatus::Retypeset { .. } => (true, format!("Redrawn · {:.0}% sure, read twice", l.confidence * 100.0)),
+                        LineStatus::Kept(why) => (false, format!("Original kept · {why}")),
+                    };
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 4.0, if ok { t.accent } else { t.text_faint });
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add(egui::Label::new(RichText::new(&l.text).font(theme::mono(12.0)).color(if ok { t.text } else { t.text_muted })).truncate());
+                            ui.label(RichText::new(detail).font(theme::body(10.5)).color(t.text_faint));
+                        });
+                    });
+                }
+            },
+        );
+        self.comparing = compare;
+        if reviewed_click {
+            self.ocr_reviewed = true;
+            self.toast(ToastKind::Ok, "Thanks, ready to print");
+        }
     }
 
     fn barcode_card(&self, ui: &mut egui::Ui, t: &Tokens) {
@@ -635,8 +861,24 @@ impl App {
         let p = ui.painter().clone();
         p.add(egui::Shadow { offset: [0, 10], blur: 30, spread: 0, color: t.shadow }.as_shape(paper, 10));
         p.rect_filled(paper, 10, t.paper);
-        if let Some(tex) = &self.out_tex {
+        let tex = if self.comparing { self.before_tex.as_ref().or(self.out_tex.as_ref()) } else { self.out_tex.as_ref() };
+        if let Some(tex) = tex {
             p.image(tex.id(), paper.shrink(2.0), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            if self.comparing {
+                let tag = Rect::from_min_size(paper.min + vec2(10.0, 10.0), vec2(78.0, 22.0));
+                p.rect_filled(tag, R_PILL, t.text);
+                p.text(tag.center(), Align2::CENTER_CENTER, "Original", theme::semibold(11.0), t.surface);
+            }
+            if let (true, Some(out), false) = (self.prefs.show_outlines, &self.output, self.comparing) {
+                let k = paper.shrink(2.0).width() / tw as f32;
+                for l in &out.ocr {
+                    if matches!(l.status, crate::ocr::LineStatus::Retypeset { .. }) {
+                        let (x, y, w, h) = l.region;
+                        let r = Rect::from_min_size(paper.min + vec2(2.0, 2.0) + vec2(x as f32, y as f32) * k, vec2(w as f32, h as f32) * k);
+                        p.rect_stroke(r, 3, Stroke::new(1.0, t.accent.gamma_multiply(0.7)), StrokeKind::Outside);
+                    }
+                }
+            }
             if let (true, Some(out)) = (self.prefs.show_outlines, &self.output) {
                 let k = paper.shrink(2.0).width() / tw as f32;
                 for b in &out.barcodes {
@@ -702,48 +944,301 @@ impl App {
         if !self.settings_open {
             return;
         }
-        let mut open = self.settings_open;
-        egui::Window::new("Label & printer")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(Align2::RIGHT_TOP, vec2(-16.0, 66.0))
-            .default_width(300.0)
+        const PAGES: [(&str, &str, &str); 7] = [
+            ("sun", "Appearance", "Themes, size and motion"),
+            ("sticker", "Label", "Size, resolution and alignment"),
+            ("crop", "Image", "Cropping, rotation and ink"),
+            ("scan-barcode", "Barcodes", "How codes are redrawn"),
+            ("sparkles", "Text (OCR)", "Re-typeset text, carefully"),
+            ("printer", "Printing", "Printer, copies and archive"),
+            ("package", "About", "Version and credits"),
+        ];
+        let screen = ctx.content_rect();
+        let size = vec2(820.0_f32.min(screen.width() - 40.0), 580.0_f32.min(screen.height() - 40.0));
+        let before = self.processing_key();
+        let before_look = (self.prefs.light_theme.clone(), self.prefs.dark_theme.clone(), self.prefs.theme, self.prefs.ui_scale, self.prefs.reduce_motion);
+        let modal = egui::Modal::new(egui::Id::unique("settings"))
+            .backdrop_color(Color32::from_black_alpha(90))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.surface)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(CornerRadius::same(R_CARD + 4))
+                    .shadow(egui::Shadow { offset: [0, 18], blur: 48, spread: 0, color: t.shadow }),
+            )
             .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 10.0;
-                let mut changed = false;
-                egui::Grid::new("dims").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                    ui.label("Label width");
-                    changed |= ui.add(egui::DragValue::new(&mut self.prefs.width_mm).range(40.0..=120.0).suffix(" mm")).changed();
-                    ui.end_row();
-                    ui.label("Label height");
-                    changed |= ui.add(egui::DragValue::new(&mut self.prefs.height_mm).range(40.0..=300.0).suffix(" mm")).changed();
-                    ui.end_row();
-                    ui.label("Edge margin");
-                    changed |= ui.add(egui::DragValue::new(&mut self.prefs.margin_mm).range(0.0..=8.0).speed(0.1).suffix(" mm")).changed();
-                    ui.end_row();
-                    ui.label("Printer resolution");
-                    egui::ComboBox::from_id_salt("dpi").selected_text(format!("{} dpi", self.prefs.dpi)).show_ui(ui, |ui| {
-                        for d in [203.0, 300.0] {
-                            changed |= ui.selectable_value(&mut self.prefs.dpi, d, format!("{d} dpi")).changed();
+                ui.set_min_size(size);
+                ui.set_max_size(size);
+                ui.horizontal_top(|ui| {
+                    // ── navigation ──
+                    let (nav, _) = ui.allocate_exact_size(vec2(218.0, size.y), Sense::hover());
+                    ui.painter().rect_filled(
+                        nav,
+                        CornerRadius { nw: R_CARD + 4, sw: R_CARD + 4, ne: 0, se: 0 },
+                        t.surface_alt,
+                    );
+                    ui.painter().vline(nav.right(), nav.y_range(), Stroke::new(1.0, t.border));
+                    let mut nav_ui = ui.new_child(egui::UiBuilder::new().max_rect(nav.shrink2(vec2(12.0, 16.0))).layout(Layout::top_down(Align::LEFT)));
+                    nav_ui.label(RichText::new("Settings").font(theme::semibold(18.0)).color(t.text));
+                    nav_ui.add_space(10.0);
+                    for (i, (icon, title, sub)) in PAGES.iter().enumerate() {
+                        let (r, resp) = nav_ui.allocate_exact_size(vec2(nav_ui.available_width(), 46.0), Sense::click());
+                        let sel = self.settings_page == i;
+                        let hover = nav_ui.ctx().animate_bool(resp.id, resp.hovered());
+                        let p = nav_ui.painter();
+                        if sel {
+                            p.rect_filled(r, R_CONTROL, t.surface);
+                            p.rect_stroke(r, R_CONTROL, Stroke::new(1.0, t.border), StrokeKind::Inside);
+                        } else if hover > 0.0 {
+                            p.rect_filled(r, R_CONTROL, t.sunken.gamma_multiply(hover));
                         }
+                        theme::paint_icon(&nav_ui, icon, Rect::from_center_size(pos2(r.left() + 20.0, r.center().y), Vec2::splat(16.0)), if sel { t.accent } else { t.text_muted });
+                        p.text(pos2(r.left() + 38.0, r.top() + 15.0), Align2::LEFT_CENTER, *title, theme::medium(13.0), t.text);
+                        p.text(pos2(r.left() + 38.0, r.top() + 32.0), Align2::LEFT_CENTER, *sub, theme::body(11.0), t.text_faint);
+                        if resp.clicked() {
+                            self.settings_page = i;
+                        }
+                    }
+                    // ── content ──
+                    ui.vertical(|ui| {
+                        ui.set_width(size.x - 218.0 - 8.0);
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(14.0);
+                            let (_, title, sub) = PAGES[self.settings_page];
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(title).font(theme::semibold(20.0)).color(t.text));
+                                ui.label(RichText::new(sub).font(theme::body(12.5)).color(t.text_faint));
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                                ui.add_space(10.0);
+                                if widgets::icon_button(ui, t, "x", "Close", 32.0).clicked() {
+                                    self.settings_open = false;
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            egui::Frame::new().inner_margin(egui::Margin { left: 14, right: 18, top: 4, bottom: 18 }).show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 12.0;
+                                match self.settings_page {
+                                    0 => self.page_appearance(ui, t),
+                                    1 => self.page_label(ui, t),
+                                    2 => self.page_image(ui, t),
+                                    3 => self.page_barcodes(ui, t),
+                                    4 => self.page_ocr(ui, t),
+                                    5 => self.page_printing(ui, t),
+                                    _ => self.page_about(ui, t),
+                                }
+                            });
+                        });
                     });
-                    ui.end_row();
                 });
-                if !cfg!(windows) {
-                    widgets::caption(ui, t, "Extra CUPS options");
-                    ui.add(egui::TextEdit::singleline(&mut self.prefs.cups_extra).hint_text("e.g. media=w288h432").desired_width(f32::INFINITY));
+            });
+        if modal.should_close() {
+            self.settings_open = false;
+        }
+        self.sync_settings();
+        if self.processing_key() != before {
+            self.dirty = true;
+        }
+        let after_look = (self.prefs.light_theme.clone(), self.prefs.dark_theme.clone(), self.prefs.theme, self.prefs.ui_scale, self.prefs.reduce_motion);
+        if after_look != before_look {
+            self.apply_look(ctx);
+        }
+    }
+
+    fn page_appearance(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        section(ui, t, "Mode", Some("Follow your system, or keep one look all the time."));
+        ui.horizontal(|ui| {
+            for (i, (icon, label)) in [("sun", "Light"), ("monitor", "Match system"), ("moon", "Dark")].iter().enumerate() {
+                if choice_chip(ui, t, icon, label, self.prefs.theme == i).clicked() {
+                    self.prefs.theme = i;
                 }
-                ui.label(
-                    RichText::new("Built for a PeriPage PB41: 100 × 150 mm at 203 dpi.")
-                        .font(theme::body(11.5))
-                        .color(t.text_faint),
-                );
-                if changed {
-                    self.dirty = true;
+            }
+        });
+        section(ui, t, "Light theme", Some("Used in light mode."));
+        self.theme_grid(ui, t, false);
+        section(ui, t, "Dark theme", Some("Used in dark mode. Set the mode to Light or Dark to keep one all the time."));
+        self.theme_grid(ui, t, true);
+        section(ui, t, "Interface", None);
+        setting_row(ui, t, "Interface size", Some("Makes everything bigger or smaller"), |ui| {
+            ui.add(egui::Slider::new(&mut self.prefs.ui_scale, 0.8..=1.4).step_by(0.05).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+        widgets::switch(ui, t, &mut self.prefs.reduce_motion, "Reduce motion", Some("Turn off animations"));
+        widgets::switch(ui, t, &mut self.prefs.show_outlines, "Outline barcodes and text in the preview", None);
+    }
+
+    fn theme_grid(&mut self, ui: &mut egui::Ui, t: &Tokens, dark_slot: bool) {
+        let current = if dark_slot { self.prefs.dark_theme.clone() } else { self.prefs.light_theme.clone() };
+        let list: Vec<theme::Tokens> = theme::THEMES.iter().copied().filter(|p| p.dark == dark_slot).collect();
+        let per_row = ((ui.available_width() + 10.0) / 138.0).floor().max(1.0) as usize;
+        for row in list.chunks(per_row) {
+            ui.horizontal(|ui| {
+                for pal in row {
+                    if theme_swatch(ui, t, pal, pal.name == current).clicked() {
+                        if dark_slot {
+                            self.prefs.dark_theme = pal.name.into();
+                        } else {
+                            self.prefs.light_theme = pal.name.into();
+                        }
+                    }
                 }
             });
-        self.settings_open = open;
+        }
+    }
+
+    fn page_label(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        section(ui, t, "Label size", Some("Pick a common size or set your own."));
+        const PRESETS: [(&str, f32, f32); 7] = [
+            ("100 × 150 mm (4 × 6 in)", 100.0, 150.0),
+            ("4 × 6 in exact", 101.6, 152.4),
+            ("A6 (105 × 148 mm)", 105.0, 148.0),
+            ("4 × 4 in", 101.6, 101.6),
+            ("4 × 3 in", 101.6, 76.2),
+            ("4 × 2 in", 101.6, 50.8),
+            ("2.25 × 1.25 in", 57.15, 31.75),
+        ];
+        ui.horizontal_wrapped(|ui| {
+            for (name, w, h) in PRESETS {
+                let on = (self.prefs.width_mm - w).abs() < 0.05 && (self.prefs.height_mm - h).abs() < 0.05;
+                if choice_chip(ui, t, "sticker", name, on).clicked() {
+                    self.prefs.width_mm = w;
+                    self.prefs.height_mm = h;
+                }
+            }
+        });
+        setting_row(ui, t, "Width", None, |ui| {
+            ui.add(egui::DragValue::new(&mut self.prefs.width_mm).range(20.0..=120.0).speed(0.1).suffix(" mm"));
+        });
+        setting_row(ui, t, "Height", None, |ui| {
+            ui.add(egui::DragValue::new(&mut self.prefs.height_mm).range(20.0..=300.0).speed(0.1).suffix(" mm"));
+        });
+        section(ui, t, "Printer", None);
+        setting_row(ui, t, "Resolution", Some("The PB41 prints at 203 dpi"), |ui| {
+            egui::ComboBox::from_id_salt("dpi").selected_text(format!("{} dpi", self.prefs.dpi)).show_ui(ui, |ui| {
+                for d in [203.0, 300.0] {
+                    ui.selectable_value(&mut self.prefs.dpi, d, format!("{d} dpi"));
+                }
+            });
+        });
+        setting_row(ui, t, "Edge margin", Some("Blank border kept around the content"), |ui| {
+            ui.add(egui::DragValue::new(&mut self.prefs.margin_mm).range(0.0..=8.0).speed(0.1).suffix(" mm"));
+        });
+        section(ui, t, "Alignment", Some("If prints come out shifted, nudge them back. + moves right / down."));
+        setting_row(ui, t, "Horizontal", None, |ui| {
+            ui.add(egui::DragValue::new(&mut self.prefs.offset_x_mm).range(-10.0..=10.0).speed(0.1).suffix(" mm"));
+        });
+        setting_row(ui, t, "Vertical", None, |ui| {
+            ui.add(egui::DragValue::new(&mut self.prefs.offset_y_mm).range(-10.0..=10.0).speed(0.1).suffix(" mm"));
+        });
+    }
+
+    fn page_image(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        section(ui, t, "Finding the label", None);
+        widgets::switch(ui, t, &mut self.prefs.auto_crop, "Crop automatically", Some("Find the label on the page; off uses the whole page"));
+        widgets::switch(ui, t, &mut self.prefs.straighten, "Straighten tilted labels", Some("Fixes small tilts in scans and photos"));
+        widgets::switch(ui, t, &mut self.prefs.auto_rotate, "Rotate automatically", Some("Turns the label so its main barcode reads left-to-right"));
+        section(ui, t, "Quality", None);
+        widgets::switch(ui, t, &mut self.prefs.vector_render, "Draw PDFs at printer resolution", Some("Sharpest text from PDFs: drawn straight onto the 203 dpi grid"));
+        widgets::switch(ui, t, &mut self.prefs.bolder, "Bolder text", Some("Thickens thin strokes by one dot, for faint prints"));
+        setting_row(ui, t, "Darkness", Some("Also on the Adjust card"), |ui| {
+            ui.add(egui::Slider::new(&mut self.prefs.darkness, -20..=20));
+        });
+    }
+
+    fn page_barcodes(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        widgets::switch(ui, t, &mut self.prefs.regenerate, "Regenerate barcodes", Some("Redraw each readable code, then re-scan it to prove it's identical"));
+        widgets::switch(ui, t, &mut self.prefs.thicker_bars, "Prefer thicker bars", Some("Rounds bar widths up: a little wider, easier to scan"));
+        note(ui, t, "A barcode that can't be read, or whose redrawn version doesn't scan back to the exact same data, always keeps its original pixels.");
+    }
+
+    fn page_ocr(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        widgets::switch(ui, t, &mut self.prefs.ocr, "Re-typeset text", Some("Reads each line and redraws it in a crisp font. Off by default."));
+        note(
+            ui,
+            t,
+            "A line is only redrawn when two separate reads agree exactly, both are confident, any long number matches a barcode, and the new text reads back the same. Everything else keeps its original pixels. For PDFs, \"Draw PDFs at printer resolution\" already gives exact text without OCR.",
+        );
+        ui.add_enabled_ui(self.prefs.ocr, |ui| {
+            setting_row(ui, t, "Confidence needed", Some("Higher means fewer lines redrawn, fewer risks"), |ui| {
+                ui.add(egui::Slider::new(&mut self.prefs.ocr_confidence, 0.8..=0.99).step_by(0.01).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            });
+            widgets::switch(ui, t, &mut self.prefs.ocr_review, "Ask me to check the text before printing", Some("Strongly recommended"));
+        });
+    }
+
+    fn page_printing(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        setting_row(ui, t, "Printer", None, |ui| {
+            egui::ComboBox::from_id_salt("printer-settings")
+                .width(240.0)
+                .selected_text(if self.prefs.printer.is_empty() { "Choose a printer" } else { &self.prefs.printer })
+                .show_ui(ui, |ui| {
+                    for p in &self.printers {
+                        ui.selectable_value(&mut self.prefs.printer, p.clone(), p);
+                    }
+                });
+        });
+        if ui.button("Refresh printer list").clicked() {
+            self.printers = print::list_printers();
+        }
+        setting_row(ui, t, "Copies", None, |ui| {
+            ui.add(egui::DragValue::new(&mut self.prefs.copies).range(1..=20));
+        });
+        widgets::switch(ui, t, &mut self.prefs.auto_print, "Print as soon as a label is ready", Some("Only when every barcode verified and no text needs checking"));
+        section(ui, t, "Keep a copy", None);
+        widgets::switch(ui, t, &mut self.prefs.archive, "Save every printed label as a PNG", None);
+        ui.add_enabled_ui(self.prefs.archive, |ui| {
+            ui.horizontal(|ui| {
+                let shown = if self.prefs.archive_dir.is_empty() { "No folder chosen".to_string() } else { self.prefs.archive_dir.clone() };
+                ui.add(egui::Label::new(RichText::new(shown).font(theme::mono(11.5)).color(t.text_muted)).truncate());
+                if ui.button("Choose folder…").clicked()
+                    && let Some(d) = rfd::FileDialog::new().pick_folder()
+                {
+                    self.prefs.archive_dir = d.display().to_string();
+                }
+            });
+        });
+        if !cfg!(windows) {
+            section(ui, t, "CUPS", None);
+            setting_row(ui, t, "Extra options", Some("Passed to lp as -o, space-separated"), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.prefs.cups_extra).hint_text("media=w288h432").desired_width(220.0));
+            });
+        }
+    }
+
+    fn page_about(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
+            widgets::logo(ui.painter(), r, t);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("LabelCraft").font(theme::semibold(18.0)).color(t.text));
+                ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(theme::mono(12.0)).color(t.text_muted));
+            });
+        });
+        ui.hyperlink_to("github.com/civarson/labelcraft", "https://github.com/civarson/labelcraft");
+        note(
+            ui,
+            t,
+            "An independent hobby project, not affiliated with ArtCraft, PhotoCraft, SolidCraft or the other Crafting Apps. Its design is a fan's take on the principles they share.",
+        );
+        section(ui, t, "Built with", None);
+        for line in [
+            "Barcodes: zxing-cpp and zint",
+            "PDF rendering: hayro",
+            "Text recognition: PaddleOCR PP-OCRv6 tiny (Apache-2.0), run with rten",
+            "Fonts: Inter, JetBrains Mono, Liberation Sans (SIL OFL)",
+            "Icons: Lucide (ISC)",
+            "Interface: egui",
+        ] {
+            ui.label(RichText::new(format!("•  {line}")).font(theme::body(12.5)).color(t.text_muted));
+        }
+        ui.add_space(8.0);
+        if widgets::ghost_button(ui, t, "refresh-cw", "Reset all settings", 180.0, true).clicked() {
+            let printer = self.prefs.printer.clone();
+            self.prefs = Prefs { printer, ..Prefs::default() };
+            self.toast(ToastKind::Ok, "Settings reset");
+        }
     }
 
     fn toasts(&mut self, ctx: &egui::Context, t: &Tokens, area: Rect) {
@@ -780,6 +1275,80 @@ impl App {
             });
         ctx.request_repaint();
     }
+}
+
+fn section(ui: &mut egui::Ui, t: &Tokens, title: &str, sub: Option<&str>) {
+    ui.add_space(6.0);
+    ui.label(RichText::new(title).font(theme::semibold(14.0)).color(t.text));
+    if let Some(s) = sub {
+        ui.add_space(-8.0);
+        ui.label(RichText::new(s).font(theme::body(12.0)).color(t.text_faint));
+    }
+}
+
+fn note(ui: &mut egui::Ui, t: &Tokens, text: &str) {
+    egui::Frame::new()
+        .fill(t.surface_alt)
+        .corner_radius(CornerRadius::same(R_CONTROL))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(text).font(theme::body(12.0)).color(t.text_muted));
+        });
+}
+
+fn setting_row(ui: &mut egui::Ui, t: &Tokens, label: &str, sub: Option<&str>, control: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.label(RichText::new(label).font(theme::medium(13.0)).color(t.text));
+            if let Some(s) = sub {
+                ui.label(RichText::new(s).font(theme::body(11.5)).color(t.text_faint));
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), control);
+    });
+}
+
+fn choice_chip(ui: &mut egui::Ui, t: &Tokens, icon: &str, label: &str, on: bool) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(label.to_string(), theme::medium(12.5), t.text);
+    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 44.0, 32.0), Sense::click());
+    let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let p = ui.painter();
+    let (fill, stroke) = if on { (t.accent_soft, t.accent) } else { (lerp(t.surface, t.surface_alt, hover), t.border) };
+    p.rect(r, R_PILL, fill, Stroke::new(if on { 1.5 } else { 1.0 }, stroke), StrokeKind::Inside);
+    theme::paint_icon(ui, icon, Rect::from_center_size(pos2(r.left() + 18.0, r.center().y), Vec2::splat(14.0)), if on { t.accent } else { t.text_muted });
+    p.galley(pos2(r.left() + 32.0, r.center().y - g.size().y / 2.0), g, if on { t.accent } else { t.text });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A mini window rendered in the palette's own colours.
+fn theme_swatch(ui: &mut egui::Ui, t: &Tokens, pal: &theme::Tokens, on: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(128.0, 92.0), Sense::click());
+    let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let p = ui.painter();
+    let card = Rect::from_min_size(r.min, vec2(r.width(), 66.0));
+    p.rect(card, R_CONTROL, pal.canvas, Stroke::new(if on { 2.0 } else { 1.0 }, if on { t.accent } else { lerp(t.border, t.border_strong, hover) }), StrokeKind::Inside);
+    let inner = card.shrink(8.0);
+    // a little "app": sidebar card, label sheet, accent button
+    let side = Rect::from_min_size(pos2(inner.right() - 44.0, inner.top()), vec2(44.0, inner.height()));
+    p.rect_filled(side, 4, pal.surface);
+    p.rect_filled(Rect::from_min_size(side.min + vec2(5.0, 6.0), vec2(34.0, 9.0)), 3, pal.accent);
+    p.rect_filled(Rect::from_min_size(side.min + vec2(5.0, 20.0), vec2(26.0, 4.0)), 2, pal.text_muted);
+    p.rect_filled(Rect::from_min_size(side.min + vec2(5.0, 28.0), vec2(20.0, 4.0)), 2, pal.text_faint);
+    p.circle_filled(side.min + vec2(34.0, 40.0), 3.5, pal.ok);
+    let sheet = Rect::from_min_size(inner.min + vec2(8.0, 0.0), vec2(30.0, inner.height()));
+    p.rect_filled(sheet, 3, pal.paper);
+    for i in 0..4 {
+        p.hline(sheet.left() + 4.0..=sheet.right() - 4.0 - (i % 2) as f32 * 8.0, sheet.top() + 7.0 + i as f32 * 8.0, Stroke::new(1.5, Color32::from_gray(60)));
+    }
+    if on {
+        let c = pos2(card.left() + 12.0, card.top() + 12.0);
+        p.circle_filled(c, 8.0, t.accent);
+        theme::paint_icon(ui, "check", Rect::from_center_size(c, Vec2::splat(11.0)), t.on_accent);
+    }
+    p.text(pos2(r.left() + 2.0, card.bottom() + 13.0), Align2::LEFT_CENTER, pal.name, theme::medium(12.0), if on { t.accent } else { t.text });
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn apply_theme(ctx: &egui::Context, choice: usize) {
@@ -848,9 +1417,9 @@ impl eframe::App for App {
             self.open(p, &ctx);
         }
         // Prefs that feed processing.
-        let before = (self.settings.darkness, self.settings.regenerate_barcodes, self.settings.dpi);
+        let before = self.processing_key();
         self.sync_settings();
-        if before != (self.settings.darkness, self.settings.regenerate_barcodes, self.settings.dpi) {
+        if before != self.processing_key() {
             self.dirty = true;
         }
 
@@ -896,7 +1465,16 @@ impl eframe::App for App {
         }
 
         // Shortcuts.
-        let (open, print_now) = ctx.input(|i| (i.key_pressed(egui::Key::O) && i.modifiers.command, i.key_pressed(egui::Key::P) && i.modifiers.command));
+        let (open, print_now, prefs_key) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::O) && i.modifiers.command,
+                i.key_pressed(egui::Key::P) && i.modifiers.command,
+                i.key_pressed(egui::Key::Comma) && i.modifiers.command,
+            )
+        });
+        if prefs_key {
+            self.settings_open = !self.settings_open;
+        }
         if open {
             self.browse(&ctx);
         }

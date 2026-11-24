@@ -1,6 +1,6 @@
 [package]
 name = "labelcraft"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -14,6 +14,9 @@ eframe = { version = "0.37", features = ["persistence"] }
 egui_extras = { version = "0.37", features = ["svg"] }
 serde = { version = "1", features = ["derive"] }
 rfd = "0.18"
+rten = "0.28"
+rten-tensor = "0.28"
+ab_glyph = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Storage_Xps"] }
@@ -21,3 +24,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphic
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

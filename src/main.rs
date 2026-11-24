@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod barcodes;
+mod ocr;
 mod gui;
 mod theme;
 mod widgets;
@@ -35,11 +36,17 @@ fn main() -> anyhow::Result<()> {
 fn cli(args: &[String]) -> anyhow::Result<()> {
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let (Some(input), Some(out)) = (positional.first(), positional.get(1)) else {
-        anyhow::bail!("usage: labelcraft --cli <input.pdf|png|jpg> <output.png> [--no-regen] [--print <printer>]");
+        anyhow::bail!("usage: labelcraft --cli <input.pdf|png|jpg> <output.png> [--no-regen] [--no-vector] [--ocr] [--print <printer>]");
     };
     let mut s = pipeline::Settings::default();
     if args.iter().any(|a| a == "--no-regen") {
         s.regenerate_barcodes = false;
+    }
+    if args.iter().any(|a| a == "--no-vector") {
+        s.vector_render = false;
+    }
+    if args.iter().any(|a| a == "--ocr") {
+        s.ocr = true;
     }
     let src = pipeline::Source::open(&PathBuf::from(input))?;
     let page = src.render_page(0)?;
@@ -50,12 +57,15 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
     for b in &o.barcodes {
         println!("{}", b.summary());
     }
+    for l in &o.ocr {
+        println!("text {:?} conf {:.2} → {:?}", l.text, l.confidence, l.status);
+    }
     let out = PathBuf::from(out);
     std::fs::write(&out, pdfout::label_png(&o.bitmap, s.dpi)?)?;
     std::fs::write(out.with_extension("pdf"), pdfout::label_pdf(&o.bitmap, s.width_mm, s.height_mm))?;
     if let Some(i) = args.iter().position(|a| a == "--print") {
         let printer = args.get(i + 1).cloned().or_else(print::default_printer).unwrap_or_default();
-        print::print(&printer, &o.bitmap, &s, "")?;
+        print::print(&printer, &o.bitmap, &s, "", 1)?;
         println!("sent to {printer}");
     }
     Ok(())

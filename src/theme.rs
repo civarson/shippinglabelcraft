@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 pub struct Tokens {
+    pub name: &'static str,
+    pub dark: bool,
     pub canvas: Color32,
     pub surface: Color32,
     pub surface_alt: Color32,
@@ -45,6 +47,8 @@ const fn hex(v: u32) -> Color32 {
 }
 
 pub const PAPER: Tokens = Tokens {
+    name: "Paper",
+    dark: false,
     canvas: hex(0xF2EDE4),
     surface: hex(0xFFFDF8),
     surface_alt: hex(0xF7F2EA),
@@ -69,6 +73,8 @@ pub const PAPER: Tokens = Tokens {
 };
 
 pub const NIGHT: Tokens = Tokens {
+    name: "Night Shift",
+    dark: true,
     canvas: hex(0x181614),
     surface: hex(0x232020),
     surface_alt: hex(0x2B2725),
@@ -92,10 +98,87 @@ pub const NIGHT: Tokens = Tokens {
     shadow: Color32::from_rgba_premultiplied(0, 0, 0, 110),
 };
 
+/// Build a palette from a handful of base colours. `soft` variants are mixed toward the surface.
+#[allow(clippy::too_many_arguments)]
+const fn palette(
+    name: &'static str,
+    dark: bool,
+    [canvas, surface, surface_alt, sunken]: [u32; 4],
+    [border, border_strong]: [u32; 2],
+    [text, text_muted, text_faint]: [u32; 3],
+    [accent, accent_hover, accent_soft, on_accent]: [u32; 4],
+    [ok, ok_soft, warn, warn_soft, danger]: [u32; 5],
+) -> Tokens {
+    Tokens {
+        name,
+        dark,
+        canvas: hex(canvas),
+        surface: hex(surface),
+        surface_alt: hex(surface_alt),
+        sunken: hex(sunken),
+        border: hex(border),
+        border_strong: hex(border_strong),
+        text: hex(text),
+        text_muted: hex(text_muted),
+        text_faint: hex(text_faint),
+        accent: hex(accent),
+        accent_hover: hex(accent_hover),
+        accent_soft: hex(accent_soft),
+        on_accent: hex(on_accent),
+        ok: hex(ok),
+        ok_soft: hex(ok_soft),
+        warn: hex(warn),
+        warn_soft: hex(warn_soft),
+        danger: hex(danger),
+        paper: hex(0xFFFFFF),
+        dots: hex(border),
+        shadow: if dark {
+            Color32::from_rgba_premultiplied(0, 0, 0, 110)
+        } else {
+            Color32::from_rgba_premultiplied(30, 30, 40, 34)
+        },
+    }
+}
+
+/// Every built-in theme. Community palettes use their published colours.
+pub const THEMES: &[Tokens] = &[
+    PAPER,
+    NIGHT,
+    palette("Catppuccin Latte", false, [0xDCE0E8, 0xEFF1F5, 0xE6E9EF, 0xCCD0DA], [0xCCD0DA, 0xACB0BE], [0x4C4F69, 0x6C6F85, 0x8C8FA1], [0x8839EF, 0x7A2FD6, 0xE7DCFB, 0xFFFFFF], [0x40A02B, 0xDCEFD6, 0xDF8E1D, 0xF8EAD3, 0xD20F39]),
+    palette("Catppuccin Mocha", true, [0x11111B, 0x1E1E2E, 0x262637, 0x181825], [0x313244, 0x45475A], [0xCDD6F4, 0xA6ADC8, 0x7F849C], [0xCBA6F7, 0xD9BDF9, 0x3B3150, 0x1E1E2E], [0xA6E3A1, 0x2A3A33, 0xF9E2AF, 0x3D3A2C, 0xF38BA8]),
+    palette("Dracula", true, [0x21222C, 0x282A36, 0x303241, 0x1E1F29], [0x44475A, 0x565970], [0xF8F8F2, 0xBDC0D2, 0x6272A4], [0xFF79C6, 0xFF92D0, 0x4A2F43, 0x282A36], [0x50FA7B, 0x24402F, 0xFFB86C, 0x45382B, 0xFF5555]),
+    palette("Nord", true, [0x272C36, 0x2E3440, 0x353C4A, 0x292E39], [0x3B4252, 0x4C566A], [0xECEFF4, 0xB6BECC, 0x7B86A0], [0x88C0D0, 0x9FD0DC, 0x2F4450, 0x2E3440], [0xA3BE8C, 0x36423A, 0xEBCB8B, 0x46433A, 0xBF616A]),
+    palette("Gruvbox Light", false, [0xF2E5BC, 0xFBF1C7, 0xF6ECC4, 0xEBDBB2], [0xE0CFA5, 0xBDAE93], [0x3C3836, 0x665C54, 0x928374], [0xD65D0E, 0xAF3A03, 0xF6D9B8, 0xFBF1C7], [0x79740E, 0xE6E3B0, 0xB57614, 0xF4DEB0, 0x9D0006]),
+    palette("Gruvbox Dark", true, [0x1D2021, 0x282828, 0x32302F, 0x242424], [0x3C3836, 0x504945], [0xEBDBB2, 0xBDAE93, 0x928374], [0xFE8019, 0xFF9A45, 0x4A3424, 0x282828], [0xB8BB26, 0x3A3A20, 0xFABD2F, 0x463A20, 0xFB4934]),
+    palette("Solarized Light", false, [0xEEE8D5, 0xFDF6E3, 0xF7F0DC, 0xE9E2CE], [0xE3DCC8, 0x93A1A1], [0x073642, 0x586E75, 0x93A1A1], [0x268BD2, 0x1F74B0, 0xD9E7EF, 0xFDF6E3], [0x859900, 0xE8EBC8, 0xB58900, 0xF2E6BF, 0xDC322F]),
+    palette("Solarized Dark", true, [0x00212B, 0x002B36, 0x073642, 0x00252F], [0x0A3D4A, 0x586E75], [0xEEE8D5, 0x93A1A1, 0x657B83], [0x268BD2, 0x4A9FE0, 0x0D3A52, 0xFDF6E3], [0x859900, 0x1D3B26, 0xB58900, 0x2E3A1C, 0xDC322F]),
+    palette("Tokyo Night", true, [0x16161E, 0x1A1B26, 0x1F2335, 0x13131A], [0x292E42, 0x414868], [0xC0CAF5, 0xA9B1D6, 0x565F89], [0x7AA2F7, 0x8FB2F9, 0x24304F, 0x1A1B26], [0x9ECE6A, 0x26332A, 0xE0AF68, 0x3A3226, 0xF7768E]),
+    palette("Rosé Pine", true, [0x191724, 0x1F1D2E, 0x26233A, 0x16141F], [0x2E2B42, 0x524F67], [0xE0DEF4, 0x908CAA, 0x6E6A86], [0xEBBCBA, 0xF2CFCD, 0x3A2E38, 0x191724], [0x9CCFD8, 0x22333A, 0xF6C177, 0x3B3128, 0xEB6F92]),
+    palette("One Dark", true, [0x21252B, 0x282C34, 0x2C313A, 0x1E2227], [0x3A3F4B, 0x4B5263], [0xDCDFE4, 0xABB2BF, 0x5C6370], [0x61AFEF, 0x7BBDF2, 0x263849, 0x21252B], [0x98C379, 0x2B3A2C, 0xE5C07B, 0x3D3828, 0xE06C75]),
+    palette("GitHub Light", false, [0xF6F8FA, 0xFFFFFF, 0xF6F8FA, 0xEFF2F5], [0xD0D7DE, 0xAFB8C1], [0x1F2328, 0x59636E, 0x818B98], [0x0969DA, 0x0550AE, 0xDDF4FF, 0xFFFFFF], [0x1A7F37, 0xDAFBE1, 0x9A6700, 0xFFF8C5, 0xD1242F]),
+    palette("GitHub Dark", true, [0x010409, 0x0D1117, 0x151B23, 0x010409], [0x30363D, 0x3D444D], [0xF0F6FC, 0x9198A1, 0x656C76], [0x4493F8, 0x6AA8FA, 0x12253F, 0xFFFFFF], [0x3FB950, 0x12261E, 0xD29922, 0x2E2414, 0xF85149]),
+];
+
+pub fn find(name: &str) -> Option<Tokens> {
+    THEMES.iter().copied().find(|t| t.name == name)
+}
+
+static ACTIVE: std::sync::RwLock<(Tokens, Tokens)> = std::sync::RwLock::new((PAPER, NIGHT));
+
 impl Tokens {
     pub fn get(ctx: &egui::Context) -> Tokens {
-        if ctx.theme() == Theme::Dark { NIGHT } else { PAPER }
+        let (light, dark) = *ACTIVE.read().unwrap();
+        if ctx.theme() == Theme::Dark { dark } else { light }
     }
+}
+
+/// Use `light` when egui is in light mode and `dark` in dark mode.
+pub fn set_palettes(ctx: &egui::Context, light: &str, dark: &str) {
+    let l = find(light).unwrap_or(PAPER);
+    let d = find(dark).unwrap_or(NIGHT);
+    *ACTIVE.write().unwrap() = (l, d);
+    ctx.set_visuals_of(Theme::Light, visuals(&l, l.dark));
+    ctx.set_visuals_of(Theme::Dark, visuals(&d, d.dark));
 }
 
 pub fn semibold(size: f32) -> FontId {
@@ -136,8 +219,7 @@ pub fn install(ctx: &egui::Context) {
     fonts.families.insert(FontFamily::Monospace, mono_fam);
     ctx.set_fonts(fonts);
 
-    ctx.set_visuals_of(Theme::Light, visuals(&PAPER, false));
-    ctx.set_visuals_of(Theme::Dark, visuals(&NIGHT, true));
+    set_palettes(ctx, PAPER.name, NIGHT.name);
     ctx.all_styles_mut(|s| {
         s.text_styles = [
             (TextStyle::Heading, semibold(18.0)),

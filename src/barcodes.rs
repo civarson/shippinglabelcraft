@@ -223,7 +223,7 @@ pub fn scan_only(bitmap: &GrayImage) -> Vec<BarcodeReport> {
 }
 
 /// Detect on the high-res working image, regenerate into the 1-bit label.
-pub fn regenerate_all(work: &GrayImage, work_scale: u32, bitmap: &mut GrayImage) -> Vec<BarcodeReport> {
+pub fn regenerate_all(work: &GrayImage, work_scale: u32, bitmap: &mut GrayImage, thicker: bool) -> Vec<BarcodeReport> {
     let ws = work_scale as f32;
     let (bw, bh) = bitmap.dimensions();
     let mut hits = find_all(work, work_scale, bitmap);
@@ -244,7 +244,7 @@ pub fn regenerate_all(work: &GrayImage, work_scale: u32, bitmap: &mut GrayImage)
         let outcome = if h.b.has_eci() {
             Err("uses ECI character sets".to_string())
         } else if is_linear(sym) {
-            regen_linear(h, ws, bitmap)
+            regen_linear(h, ws, bitmap, thicker)
         } else if sym == F::MaxiCode {
             regen_maxicode(h, ws, bitmap)
         } else {
@@ -342,7 +342,7 @@ fn replace_verified(
     }
 }
 
-fn regen_linear(h: &Hit, ws: f32, bitmap: &mut GrayImage) -> Result<(Rect, u32), String> {
+fn regen_linear(h: &Hit, ws: f32, bitmap: &mut GrayImage, thicker: bool) -> Result<(Rect, u32), String> {
     let (bw, bh) = bitmap.dimensions();
     let c = &h.quad;
     let (dx, dy) = (c[1].0 - c[0].0, c[1].1 - c[0].1);
@@ -358,7 +358,8 @@ fn regen_linear(h: &Hit, ws: f32, bitmap: &mut GrayImage) -> Result<(Rect, u32),
     let modules = grid.width();
 
     // Whole-dot module width giving the closest overall width to the original.
-    let mut x = (orig_w / modules as f32).round().max(1.0) as u32;
+    let ideal = orig_w / modules as f32;
+    let mut x = (if thicker { ideal.ceil() } else { ideal.round() }).max(1.0) as u32;
     while x > 1 && modules * x + 8 > bw {
         x -= 1;
     }

@@ -15,8 +15,11 @@ pub fn default_printer() -> Option<String> {
 }
 
 /// Print the 1-bit label on `printer`.
-pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra_cups_options: &str) -> Result<()> {
-    imp::print(printer, bitmap, s, extra_cups_options)
+pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra_cups_options: &str, copies: u32) -> Result<()> {
+    for _ in 0..copies.clamp(1, 20) {
+        imp::print(printer, bitmap, s, extra_cups_options)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]

@@ -1,0 +1,4 @@
+PaddleOCR PP-OCRv6 tiny text detection and recognition models (det.onnx, rec.onnx, dict.txt),
+from PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR) as converted to ONNX by OnnxOCR
+(https://github.com/jingsongliujing/OnnxOCR). Both are licensed under the Apache License 2.0;
+see LICENSE-Apache-2.0.txt.

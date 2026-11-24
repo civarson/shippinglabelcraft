@@ -25,8 +25,9 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
 2. **Straightens and orients it.** It corrects small skews and turns the label so the main
    barcode reads left-to-right in portrait, including upside-down and landscape sources.
 3. **Fits it to the printer's dot grid.** The output is exactly 799 × 1199 dots, converted
-   to clean black and white. Vector PDFs use a fixed cut-off, and raster images use an
-   adaptive one so faint text survives.
+   to clean black and white. PDFs are redrawn straight onto that grid from their vector
+   content (fonts, lines, barcodes), rotation and all, so text edges land exactly on dots
+   instead of being resampled. Images use an adaptive cut-off so faint text survives.
 4. **Regenerates the barcodes.** Every barcode that decodes is re-encoded from its exact
    data and redrawn with whole-dot module widths. That covers Code 128 (including
    GS1-128/USPS IMpb), PDF417 (FedEx), MaxiCode (UPS), Data Matrix, QR, and Aztec.
@@ -36,9 +37,19 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
 5. **Prints.** On Windows it prints through GDI at the driver's real resolution. On macOS
    it sends an exact-size PDF to CUPS with scaling turned off.
 
-**Text is not re-typeset.** It is cleaned up and snapped to the dot grid, not run through
-OCR. A misread character in an address or ZIP code could misroute a package, so the tool
-never prints text it guessed.
+6. **Optionally re-typesets text (off by default).** For blurry images and scans, *Text
+   (OCR)* in Settings reads each line and redraws it in Liberation Sans. Because a misread
+   ZIP code or house number misroutes a package, a line is only redrawn when:
+   - two separate reads (high-resolution and print-resolution) agree exactly,
+   - both are confident (90% by default, adjustable),
+   - any long number in it matches a barcode's data, and
+   - the redrawn line reads back as exactly the same text.
+
+   Every other line keeps its original pixels. When anything was redrawn, **Print** turns
+   into **Check the text first**: hold *Original* to compare, then click *Looks right*.
+   PDFs don't need OCR: step 3 already draws their real text.
+
+<p align="center"><img src="docs/text-review.png" alt="LabelCraft in the Catppuccin Mocha theme with re-typeset text lines outlined on the label and the Print button reading 'Check the text first'" width="80%"></p>
 
 ## Using it
 
@@ -47,7 +58,21 @@ never prints text it guessed.
   original was kept, with the reason. If a barcode on the original isn't listed at all,
   it couldn't be read from the source.
 - Pick the printer once (it's remembered), then click **Print label** (or press Ctrl/⌘-P).
-- The **settings** button (top right) lets you change the label size, the edge margin, and 300 dpi.
+- **Settings** (gear, top right, or Ctrl/⌘-,):
+  - **Appearance:** 15 colour themes, picked separately for light and dark mode (Paper,
+    Night Shift, Catppuccin Latte and Mocha, Dracula, Nord, Gruvbox Light and Dark,
+    Solarized Light and Dark, Tokyo Night, Rosé Pine, One Dark, GitHub Light and Dark),
+    interface size, reduce motion
+  - **Label:** size presets (4×6, A6, 4×4, 4×3, 4×2, 2.25×1.25 in) or custom, 203/300 dpi,
+    edge margin, and an alignment nudge if prints come out shifted
+  - **Image:** automatic crop / straighten / rotate on or off, drawing PDFs at printer
+    resolution, bolder text
+  - **Barcodes:** regenerate on or off, prefer thicker bars
+  - **Text (OCR):** opt-in re-typesetting, confidence needed, review before printing
+  - **Printing:** printer, copies, print automatically when a label is ready (only if every
+    barcode verified and no text needs checking), save a PNG of every printed label
+
+<p align="center"><img src="docs/settings-appearance.png" alt="The Settings window on the Appearance page, showing light and dark theme swatches" width="70%"></p>
 - Drag across the original to crop by hand; the **×** next to *Manual* goes back to automatic.
 
 ### PeriPage PB41 setup
@@ -65,6 +90,8 @@ never prints text it guessed.
 ```
 labelcraft --cli input.pdf out.png              # writes out.png and out.pdf, prints the report
 labelcraft --cli input.jpg out.png --no-regen   # clean-up only
+labelcraft --cli input.jpg out.png --ocr        # also re-typeset text, listing each line's outcome
+labelcraft --cli input.pdf out.png --no-vector  # resample the PDF instead of drawing it at printer resolution
 labelcraft --cli input.pdf out.png --print "PB41"
 ```
 
@@ -103,13 +130,17 @@ The macOS app is ad-hoc signed. On first launch, right-click it and choose **Ope
 
 - [Inter](https://rsms.me/inter/) and [JetBrains Mono](https://www.jetbrains.com/lp/mono/) fonts, SIL Open Font License 1.1 (`assets/fonts/OFL-*.txt`)
 - [Lucide](https://lucide.dev) icons, ISC licence (`assets/icons/LICENSE-lucide.txt`)
+- [Liberation Sans](https://github.com/liberationfonts/liberation-fonts) for re-typeset text, SIL Open Font License 1.1 (`assets/fonts/OFL-LiberationSans.txt`)
+- Text recognition: [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) PP-OCRv6 tiny models as packaged by [OnnxOCR](https://github.com/jingsongliujing/OnnxOCR), Apache 2.0 (`assets/ocr/`), run with [rten](https://github.com/robertknight/rten)
+- Colour themes follow the published palettes of Catppuccin, Dracula, Nord, Gruvbox, Solarized, Tokyo Night, Rosé Pine, One Dark and GitHub's Primer
 - Barcode reading and writing by [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) with [zint](https://zint.org.uk); PDF rendering by [hayro](https://github.com/LaurenzV/hayro); UI by [egui](https://github.com/emilk/egui)
 
 ## Layout
 
 | File | Purpose |
 |---|---|
-| `src/pipeline.rs` | Loading (PDF via hayro, images with EXIF rotation), auto-crop, deskew, orientation, fit, thresholding |
+| `src/pipeline.rs` | Loading (PDF via hayro, images with EXIF rotation), auto-crop, deskew, orientation, fit, PDF redraw at the dot grid, thresholding |
+| `src/ocr.rs` | Opt-in OCR re-typesetting with double reads, barcode cross-checks and read-back verification |
 | `src/barcodes.rs` | Detection, isolated-blob second pass, exact re-encoding, verification and rollback |
 | `src/print.rs` | Windows GDI printing, CUPS `lp` on macOS/Linux |
 | `src/pdfout.rs` | Exact-size 1-bit PDF and PNG with DPI metadata |

@@ -24,6 +24,24 @@ pub struct Settings {
     pub manual_crop: Option<(u32, u32, u32, u32)>,
     /// PDF page index (0-based).
     pub page: usize,
+    /// Redraw PDFs straight onto the printer's dot grid (vs. resampling a raster).
+    pub vector_render: bool,
+    /// Find the label on the page automatically (else use the whole page).
+    pub auto_crop: bool,
+    /// Correct small tilts.
+    pub straighten: bool,
+    /// Turn the label so its main barcode reads left-to-right.
+    pub auto_rotate: bool,
+    /// Thicken thin strokes by one dot (helps faint thermal prints).
+    pub bolder: bool,
+    /// Round barcode bar widths up rather than to nearest (easier scanning, slightly wider).
+    pub thicker_bars: bool,
+    /// Nudge the printed image (mm, + = right/down) to correct printer alignment.
+    pub offset_x_mm: f32,
+    pub offset_y_mm: f32,
+    /// Opt-in OCR re-typesetting of text lines.
+    pub ocr: bool,
+    pub ocr_settings: crate::ocr::OcrSettings,
 }
 
 impl Default for Settings {
@@ -38,6 +56,16 @@ impl Default for Settings {
             extra_rotation: 0,
             manual_crop: None,
             page: 0,
+            vector_render: true,
+            auto_crop: true,
+            straighten: true,
+            auto_rotate: true,
+            bolder: false,
+            thicker_bars: false,
+            offset_x_mm: 0.0,
+            offset_y_mm: 0.0,
+            ocr: false,
+            ocr_settings: Default::default(),
         }
     }
 }
@@ -67,6 +95,53 @@ pub enum SourceKind {
 pub struct SourcePage {
     pub gray: GrayImage,
     pub is_vector: bool,
+    /// For PDFs: enough to re-render the page straight onto the printer's dot grid.
+    pub pdf: Option<PdfPage>,
+}
+
+#[derive(Clone)]
+pub struct PdfPage {
+    pub data: std::sync::Arc<Vec<u8>>,
+    pub index: usize,
+    /// Pixels per PDF point used for `gray`.
+    pub scale: f32,
+}
+
+/// 2D affine transform, kurbo coefficient order: x' = a·x + c·y + e, y' = b·x + d·y + f.
+#[derive(Clone, Copy, Debug)]
+pub struct Xf([f64; 6]);
+
+impl Xf {
+    pub const IDENTITY: Xf = Xf([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    pub fn translate(x: f64, y: f64) -> Xf {
+        Xf([1.0, 0.0, 0.0, 1.0, x, y])
+    }
+    pub fn scale(sx: f64, sy: f64) -> Xf {
+        Xf([sx, 0.0, 0.0, sy, 0.0, 0.0])
+    }
+    /// `self` first, then `next`.
+    pub fn then(self, next: Xf) -> Xf {
+        let [a1, b1, c1, d1, e1, f1] = self.0;
+        let [a2, b2, c2, d2, e2, f2] = next.0;
+        Xf([
+            a2 * a1 + c2 * b1,
+            b2 * a1 + d2 * b1,
+            a2 * c1 + c2 * d1,
+            b2 * c1 + d2 * d1,
+            a2 * e1 + c2 * f1 + e2,
+            b2 * e1 + d2 * f1 + f2,
+        ])
+    }
+    /// The pixel mapping of `rotate_quarter(img, q)` for an image of size w×h.
+    fn quarter(q: u8, w: u32, h: u32) -> Xf {
+        let (w, h) = (w as f64, h as f64);
+        match q % 4 {
+            1 => Xf([0.0, 1.0, -1.0, 0.0, h, 0.0]),
+            2 => Xf([-1.0, 0.0, 0.0, -1.0, w, h]),
+            3 => Xf([0.0, -1.0, 1.0, 0.0, 0.0, w]),
+            _ => Xf::IDENTITY,
+        }
+    }
 }
 
 pub struct Output {
@@ -76,6 +151,10 @@ pub struct Output {
     pub crop: (u32, u32, u32, u32),
     pub barcodes: Vec<BarcodeReport>,
     pub notes: Vec<String>,
+    /// OCR results (empty when OCR is off).
+    pub ocr: Vec<crate::ocr::OcrLine>,
+    /// The label before any text was re-typeset, for side-by-side review.
+    pub before_ocr: Option<GrayImage>,
 }
 
 const PDF_RENDER_DPI: f32 = 300.0;
@@ -106,13 +185,14 @@ impl Source {
 
     pub fn render_page(&self, page: usize) -> Result<SourcePage> {
         match &self.kind {
-            SourceKind::Raster(g) => Ok(SourcePage { gray: g.clone(), is_vector: false }),
+            SourceKind::Raster(g) => Ok(SourcePage { gray: g.clone(), is_vector: false, pdf: None }),
             SourceKind::Pdf(data) => {
                 let pdf = hayro::hayro_syntax::Pdf::new(data.clone())
                     .map_err(|e| anyhow!("could not open PDF: {e:?}"))?;
                 let pages = pdf.pages();
+                let page_index = page.min(pages.len() - 1);
                 let page = pages
-                    .get(page.min(pages.len() - 1))
+                    .get(page_index)
                     .ok_or_else(|| anyhow!("page out of range"))?;
                 let (w, h) = page.render_dimensions();
                 // Keep the render under ~6000 px on the long side.
@@ -146,7 +226,7 @@ impl Source {
                 }
                 // A PDF that is just one embedded scan is not "vector" in any useful sense,
                 // but its render is still at least as good as the embedded image.
-                Ok(SourcePage { gray, is_vector: true })
+                Ok(SourcePage { gray, is_vector: true, pdf: Some(PdfPage { data: data.clone(), index: page_index, scale }) })
             }
         }
     }
@@ -183,6 +263,7 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
     // 1. Crop to the label.
     let crop = match s.manual_crop {
         Some(c) => clamp_rect(c, src.width(), src.height()),
+        None if !s.auto_crop => (0, 0, src.width(), src.height()),
         None => {
             let (c, how) = auto_crop(src, page.is_vector);
             notes.push(how);
@@ -190,11 +271,16 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
         }
     };
     let mut img = imageops::crop_imm(src, crop.0, crop.1, crop.2, crop.3).to_image();
+    // Source-page pixels → current image pixels; extended with every geometric step so a PDF
+    // can later be redrawn directly at the printer's resolution.
+    let mut m = Xf::translate(-(crop.0 as f64), -(crop.1 as f64));
 
     // 2. Straighten small skews (scans, photos, screenshots of rotated PDFs).
-    let skew = estimate_skew(&img);
+    let skew = if s.straighten { estimate_skew(&img) } else { 0.0 };
     if skew.abs() > 0.15 {
-        img = rotate_fine(&img, skew.to_radians());
+        let (r, x) = rotate_fine_xf(&img, skew.to_radians());
+        img = r;
+        m = m.then(x);
         notes.push(format!("Straightened by {skew:.1}°"));
     }
 
@@ -203,9 +289,9 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
     }
     // 3. Orientation from the main 1D barcode's reading direction. Try the image as-is,
     //    then an upscaled copy (helps the decoder with low-res sources).
-    let mut angle = barcodes::reading_angle(&img);
+    let mut angle = if s.auto_rotate { barcodes::reading_angle(&img) } else { None };
     let long = img.width().max(img.height());
-    if angle.is_none() && long < 2400 {
+    if s.auto_rotate && angle.is_none() && long < 2400 {
         let f = 2400.0 / long as f32;
         let up = imageops::resize(
             &img,
@@ -219,18 +305,23 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
         Some(angle) => {
             let deg = angle.to_degrees();
             let quarter = ((-deg / 90.0).round() as i32).rem_euclid(4) as u8;
+            m = m.then(Xf::quarter(quarter, img.width(), img.height()));
             img = rotate_quarter(&img, quarter);
             let residual = -deg - quarter as f32 * 90.0;
             let residual = ((residual + 180.0).rem_euclid(360.0)) - 180.0;
             if residual.abs() > 0.15 {
-                img = rotate_fine(&img, residual.to_radians());
+                let (r, x) = rotate_fine_xf(&img, residual.to_radians());
+                img = r;
+                m = m.then(x);
             }
             if quarter != 0 {
                 notes.push(format!("Rotated {}° so the barcode reads left-to-right", quarter as u32 * 90));
             }
         }
+        None if !s.auto_rotate => notes.push("Automatic rotation is off".into()),
         None => {
             if img.width() > img.height() {
+                m = m.then(Xf::quarter(1, img.width(), img.height()));
                 img = rotate_quarter(&img, 1);
                 notes.push(
                     "No 1D barcode to orient by: turned landscape → portrait (check it isn't upside down)".into(),
@@ -241,6 +332,7 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
         }
     }
     if !s.extra_rotation.is_multiple_of(4) {
+        m = m.then(Xf::quarter(s.extra_rotation % 4, img.width(), img.height()));
         img = rotate_quarter(&img, s.extra_rotation % 4);
     }
 
@@ -259,6 +351,7 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
         img.height(),
     );
     let img = imageops::crop_imm(&img, content.0, content.1, content.2, content.3).to_image();
+    m = m.then(Xf::translate(-(content.0 as f64), -(content.1 as f64)));
 
     let margin = (s.margin_mm / 25.4 * s.dpi).round() as u32;
     let (aw, ah) = (tw.saturating_sub(2 * margin).max(1), th.saturating_sub(2 * margin).max(1));
@@ -273,23 +366,146 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
     let ox = (tw - fw) / 2;
     let oy = (th - fh) / 2;
 
-    let work_scale = 2u32;
-    let work_fitted = imageops::resize(&img, fw * work_scale, fh * work_scale, imageops::FilterType::Lanczos3);
-    let mut work = GrayImage::from_pixel(tw * work_scale, th * work_scale, Luma([255]));
-    imageops::overlay(&mut work, &work_fitted, (ox * work_scale) as i64, (oy * work_scale) as i64);
+    m = m
+        .then(Xf::scale(fw as f64 / img.width() as f64, fh as f64 / img.height() as f64))
+        .then(Xf::translate(ox as f64, oy as f64));
 
-    // 5. Threshold down to the printer grid.
-    let gray_t = downsample2(&work);
+    let work_scale = 2u32;
+    let (work, gray_t) = match page.pdf.as_ref().filter(|_| s.vector_render) {
+        // PDFs: draw the vector content straight onto the dot grid (and a 2× copy for the
+        // barcode reader) instead of resampling a raster. Text edges land exactly on dots.
+        Some(pdf) => {
+            let full = render_pdf_with(pdf, m, tw, th);
+            let work = render_pdf_with(pdf, m.then(Xf::scale(work_scale as f64, work_scale as f64)), tw * work_scale, th * work_scale);
+            match (full, work) {
+                (Some(f), Some(w)) => (w, f),
+                _ => resampled(&img, fw, fh, ox, oy, tw, th, work_scale),
+            }
+        }
+        None => resampled(&img, fw, fh, ox, oy, tw, th, work_scale),
+    };
+
+    // 5. Threshold to the printer grid.
     let mut bitmap = threshold(&gray_t, page.is_vector, s.darkness);
+    if s.bolder {
+        bitmap = embolden(&bitmap);
+    }
 
     // 6. Barcodes.
-    let reports = if s.regenerate_barcodes {
-        barcodes::regenerate_all(&work, work_scale, &mut bitmap)
+    let mut reports = if s.regenerate_barcodes {
+        barcodes::regenerate_all(&work, work_scale, &mut bitmap, s.thicker_bars)
     } else {
         barcodes::scan_only(&bitmap)
     };
 
-    Ok(Output { bitmap, crop, barcodes: reports, notes })
+    // 7. Optional OCR re-typesetting.
+    let (mut ocr, mut before_ocr) = (Vec::new(), None);
+    if s.ocr {
+        let before = bitmap.clone();
+        match crate::ocr::retypeset(&work, work_scale, &gray_t, &mut bitmap, &reports, &s.ocr_settings) {
+            Ok(lines) => {
+                let n = lines.iter().filter(|l| matches!(l.status, crate::ocr::LineStatus::Retypeset { .. })).count();
+                if n > 0 {
+                    before_ocr = Some(before);
+                }
+                ocr = lines;
+            }
+            Err(e) => notes.push(format!("OCR unavailable: {e}")),
+        }
+    }
+
+    // 8. Alignment nudge.
+    let (dx, dy) = ((s.offset_x_mm / 25.4 * s.dpi).round() as i64, (s.offset_y_mm / 25.4 * s.dpi).round() as i64);
+    if dx != 0 || dy != 0 {
+        bitmap = shift(&bitmap, dx, dy);
+        before_ocr = before_ocr.map(|b| shift(&b, dx, dy));
+        let mv = |r: (u32, u32, u32, u32)| ((r.0 as i64 + dx).max(0) as u32, (r.1 as i64 + dy).max(0) as u32, r.2, r.3);
+        for l in ocr.iter_mut() {
+            l.region = mv(l.region);
+        }
+        for b in reports.iter_mut() {
+            b.region = mv(b.region);
+        }
+    }
+
+    Ok(Output { bitmap, crop, barcodes: reports, notes, ocr, before_ocr })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resampled(img: &GrayImage, fw: u32, fh: u32, ox: u32, oy: u32, tw: u32, th: u32, ws: u32) -> (GrayImage, GrayImage) {
+    let fitted = imageops::resize(img, fw * ws, fh * ws, imageops::FilterType::Lanczos3);
+    let mut work = GrayImage::from_pixel(tw * ws, th * ws, Luma([255]));
+    imageops::overlay(&mut work, &fitted, (ox * ws) as i64, (oy * ws) as i64);
+    let gray = downsample2(&work);
+    (work, gray)
+}
+
+/// Render a PDF page with `m` (source-render pixels → output pixels) into a w×h gray image.
+fn render_pdf_with(pdf: &PdfPage, m: Xf, w: u32, h: u32) -> Option<GrayImage> {
+    use hayro::hayro_interpret::util::TransformExt;
+    use hayro::kurbo::Affine;
+    if w > u16::MAX as u32 || h > u16::MAX as u32 {
+        return None;
+    }
+    let doc = hayro::hayro_syntax::Pdf::new(pdf.data.clone()).ok()?;
+    let pages = doc.pages();
+    let page = pages.get(pdf.index)?;
+    let to_src = Affine::scale(pdf.scale as f64) * page.initial_transform(true).to_kurbo();
+    let full = Affine::new(m.0) * to_src;
+    let cache = hayro::RenderCache::new();
+    let mut ctx = hayro::vello_cpu::RenderContext::new(w as u16, h as u16);
+    hayro::render_into(
+        page,
+        &cache,
+        &hayro::hayro_interpret::InterpreterSettings::default(),
+        // Bilinear for embedded images: many carrier PDFs wrap a 1-bit scan of the label, and
+        // nearest-neighbour at a non-integer scale is what makes small text look ragged.
+        &hayro::RenderSettings {
+            force_image_interpolation: std::env::var_os("LABELCRAFT_NEAREST").is_none(),
+            ..Default::default()
+        },
+        &mut ctx,
+        full,
+    );
+    ctx.flush();
+    let mut pix = hayro::vello_cpu::Pixmap::new(w as u16, h as u16);
+    ctx.render_with(
+        &mut pix,
+        &mut hayro::vello_cpu::Resources::default(),
+        hayro::vello_cpu::RasterizerSettings {
+            target_init: hayro::vello_cpu::TargetInit::Clear(hayro::vello_cpu::color::palette::css::WHITE),
+            ..Default::default()
+        },
+    );
+    let mut gray = GrayImage::new(w, h);
+    for (i, px) in pix.data().iter().enumerate() {
+        let a = px.a as f32 / 255.0;
+        let l = 0.299 * px.r as f32 + 0.587 * px.g as f32 + 0.114 * px.b as f32 + 255.0 * (1.0 - a);
+        gray.as_mut()[i] = l.clamp(0.0, 255.0) as u8;
+    }
+    Some(gray)
+}
+
+/// Thicken dark strokes by one dot (to the right and down), keeping counters open.
+fn embolden(b: &GrayImage) -> GrayImage {
+    let mut out = b.clone();
+    for (x, y, p) in b.enumerate_pixels() {
+        if p[0] < 128 {
+            if x + 1 < b.width() {
+                out.put_pixel(x + 1, y, Luma([0]));
+            }
+            if y + 1 < b.height() && x % 2 == 0 {
+                out.put_pixel(x, y + 1, Luma([0]));
+            }
+        }
+    }
+    out
+}
+
+fn shift(b: &GrayImage, dx: i64, dy: i64) -> GrayImage {
+    let mut out = GrayImage::from_pixel(b.width(), b.height(), Luma([255]));
+    imageops::overlay(&mut out, b, dx, dy);
+    out
 }
 
 fn clamp_rect(r: (u32, u32, u32, u32), w: u32, h: u32) -> (u32, u32, u32, u32) {
@@ -581,6 +797,16 @@ pub fn rotate_quarter(img: &GrayImage, q: u8) -> GrayImage {
         3 => imageops::rotate270(img),
         _ => img.clone(),
     }
+}
+
+/// [`rotate_fine`] plus the pixel mapping it applied.
+pub fn rotate_fine_xf(img: &GrayImage, angle: f32) -> (GrayImage, Xf) {
+    let out = rotate_fine(img, angle);
+    let (s, c) = (angle as f64).sin_cos();
+    let (cx, cy) = (img.width() as f64 / 2.0, img.height() as f64 / 2.0);
+    let (ncx, ncy) = (out.width() as f64 / 2.0, out.height() as f64 / 2.0);
+    let x = Xf([c, s, -s, c, -c * cx + s * cy + ncx, -s * cx - c * cy + ncy]);
+    (out, x)
 }
 
 /// Rotate by an arbitrary angle (radians, clockwise-positive in image coords), expanding the canvas.
