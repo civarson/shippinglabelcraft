@@ -4,3 +4,4 @@ target/
 !docs/*.png
 debug_*
 !packaging/**/*.png
+!assets/icon-256.png

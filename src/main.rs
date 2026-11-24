@@ -27,11 +27,21 @@ fn main() -> anyhow::Result<()> {
             .with_title("LabelCraft")
             .with_inner_size([1180.0, 820.0])
             .with_min_inner_size([900.0, 620.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native("LabelCraft", options, Box::new(move |cc| Ok(Box::new(gui::App::new(cc, initial)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The window/taskbar/dock icon.
+fn app_icon() -> eframe::egui::IconData {
+    let img = image::load_from_memory(include_bytes!("../assets/icon-256.png")).map(|i| i.to_rgba8());
+    match img {
+        Ok(i) => eframe::egui::IconData { width: i.width(), height: i.height(), rgba: i.into_raw() },
+        Err(_) => eframe::egui::IconData::default(),
+    }
 }
 
 fn cli(args: &[String]) -> anyhow::Result<()> {
