@@ -1,6 +1,6 @@
 name: build
 
-# Every push to main builds Windows + macOS apps. If Cargo.toml's version has no
+# Every push to main builds Windows, macOS (universal) and Linux apps. If Cargo.toml's version has no
 # release yet, a GitHub Release "vX.Y.Z" is created with both zips attached.
 # Pushing a v* tag (or publishing a release from the web UI) builds and attaches too.
 on:
@@ -19,15 +19,31 @@ jobs:
           - os: windows-latest
             name: windows-x64
           - os: macos-latest
-            name: macos-arm64
+            name: macos-universal
+          - os: ubuntu-22.04 # oldest supported glibc, so the binary runs on more distros
+            name: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
+        if: runner.os != 'macOS'
         run: cargo build --release
+
+      - name: Build (macOS, Apple Silicon + Intel)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/labelcraft \
+            target/aarch64-apple-darwin/release/labelcraft \
+            target/x86_64-apple-darwin/release/labelcraft
+          lipo -info target/release/labelcraft
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -62,10 +78,32 @@ jobs:
           codesign --force --deep -s - "$APP"
           cd dist && ditto -c -k --keepParent "LabelCraft.app" ../labelcraft-${{ matrix.name }}.zip
 
+      - name: Package (Linux AppImage + tar.gz)
+        if: runner.os == 'Linux'
+        run: |
+          strip target/release/labelcraft
+          # Plain tarball
+          mkdir -p dist/labelcraft
+          cp target/release/labelcraft packaging/linux/labelcraft.desktop packaging/linux/labelcraft.png README.md dist/labelcraft/
+          tar -C dist -czf labelcraft-${{ matrix.name }}.tar.gz labelcraft
+          # AppImage
+          APPDIR=dist/LabelCraft.AppDir
+          mkdir -p $APPDIR/usr/bin
+          cp target/release/labelcraft $APPDIR/usr/bin/
+          cp packaging/linux/labelcraft.desktop packaging/linux/labelcraft.png $APPDIR/
+          ln -s usr/bin/labelcraft $APPDIR/AppRun
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool $APPDIR labelcraft-${{ matrix.name }}.AppImage
+
       - uses: actions/upload-artifact@v4
         with:
           name: labelcraft-${{ matrix.name }}
-          path: labelcraft-${{ matrix.name }}.zip
+          path: |
+            labelcraft-${{ matrix.name }}.zip
+            labelcraft-${{ matrix.name }}.tar.gz
+            labelcraft-${{ matrix.name }}.AppImage
+          if-no-files-found: error
 
   release:
     needs: build
@@ -104,15 +142,17 @@ jobs:
           tag_name: ${{ steps.tag.outputs.name }}
           name: LabelCraft ${{ steps.tag.outputs.name }}
           target_commitish: ${{ github.sha }}
-          files: dist/*.zip
+          files: dist/*
           generate_release_notes: true
           body: |
             ## Download
             - **Windows (x64):** `labelcraft-windows-x64.zip` → `LabelCraft.exe`
               SmartScreen will warn because the app isn't code-signed: click **More info → Run anyway**.
               If it says `VCRUNTIME140.dll` is missing, install the Microsoft Visual C++ Redistributable (x64).
-            - **macOS (Apple Silicon):** `labelcraft-macos-arm64.zip` → `LabelCraft.app`
+            - **macOS (Apple Silicon and Intel):** `labelcraft-macos-universal.zip` → `LabelCraft.app`
               Right-click → **Open** the first time (the app is ad-hoc signed).
+            - **Linux (x86_64):** `labelcraft-linux-x86_64.AppImage` (`chmod +x`, then run it), or
+              `labelcraft-linux-x86_64.tar.gz` with the plain binary. Printing uses CUPS.
 
             ## Using it
             Drop a label PDF or image on the window, check that the barcodes list is green, pick your printer, and click **Print label**.

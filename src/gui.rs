@@ -16,6 +16,7 @@ use crate::ocr::{LineKind, LineStatus, OcrLine};
 use crate::pipeline::{Output, Settings, Source, SourcePage};
 use crate::theme::{self, R_CARD, R_CONTROL, R_PILL, Tokens};
 use crate::widgets::{self, lerp};
+use crate::printers::{self, RawLang};
 use crate::{pdfout, print};
 
 const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl " };
@@ -54,6 +55,10 @@ struct Prefs {
     auto_print: bool,
     archive: bool,
     archive_dir: String,
+    /// Printer model profile: "auto" (from the printer's name), a profile id, or "custom".
+    printer_profile: String,
+    /// Direct printing in the printer's own language: "off", "auto", "zpl" or "tspl".
+    raw_mode: String,
     /// Bumped when a default changes enough that saved values should be refreshed.
     rev: u32,
 }
@@ -94,6 +99,8 @@ impl Default for Prefs {
             auto_print: false,
             archive: false,
             archive_dir: String::new(),
+            printer_profile: "auto".into(),
+            raw_mode: "off".into(),
             rev: PREFS_REV,
         }
     }
@@ -272,8 +279,10 @@ impl App {
 
     fn sync_settings(&mut self) {
         let p = &self.prefs;
-        self.settings.dpi = p.dpi;
-        self.settings.width_mm = p.width_mm;
+        let r = printers::resolve(&p.printer_profile, &p.printer, p.dpi);
+        self.settings.dpi = r.dpi;
+        // Never draw wider than the print head can print.
+        self.settings.width_mm = r.profile.map_or(p.width_mm, |pr| p.width_mm.min(pr.head_mm));
         self.settings.height_mm = p.height_mm;
         self.settings.margin_mm = p.margin_mm;
         self.settings.darkness = p.darkness;
@@ -431,6 +440,52 @@ impl App {
         }
         if self.dirty && !self.busy {
             self.reprocess(ctx);
+        }
+    }
+
+    // ───────────────────────────── printer model ─────────────────────────────
+
+    fn resolved_printer(&self) -> printers::Resolved {
+        printers::resolve(&self.prefs.printer_profile, &self.prefs.printer, self.prefs.dpi)
+    }
+
+    /// The language to print in directly, if direct printing is on.
+    fn raw_lang(&self) -> Option<RawLang> {
+        match self.prefs.raw_mode.as_str() {
+            "auto" => self.resolved_printer().profile.and_then(|p| p.raw),
+            other => RawLang::from_id(other),
+        }
+    }
+
+    fn raw_job(&self, lang: RawLang, bitmap: &GrayImage, copies: u32) -> Vec<u8> {
+        // Darkness is already baked into the bitmap's threshold; leave the printer's heat alone.
+        match lang {
+            RawLang::Zpl => printers::to_zpl(bitmap, 0, copies),
+            RawLang::Tspl => printers::to_tspl(bitmap, self.settings.width_mm, self.settings.height_mm, 0, copies),
+        }
+    }
+
+    fn save_raw(&mut self, lang: RawLang) {
+        let Some(out) = &self.output else {
+            self.toast(ToastKind::Warn, "Open a label first");
+            return;
+        };
+        let job = self.raw_job(lang, &out.bitmap, 1);
+        let stem = self
+            .source
+            .as_ref()
+            .and_then(|s| std::path::Path::new(&s.name).file_stem().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "label".into());
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name(format!("{stem}-print.{}", lang.ext()))
+            .add_filter(lang.name(), &[lang.ext()])
+            .save_file()
+        else {
+            return;
+        };
+        match std::fs::write(&path, job) {
+            Ok(()) => self.toast(ToastKind::Ok, format!("Saved {} job", lang.name())),
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't save: {e}")),
         }
     }
 
@@ -659,7 +714,11 @@ impl App {
             return;
         }
         let copies = self.prefs.copies.max(1);
-        match print::print(&self.prefs.printer, &out.bitmap, &self.settings, &self.prefs.cups_extra, copies) {
+        let sent = match self.raw_lang() {
+            Some(lang) => print::print_raw(&self.prefs.printer, &self.raw_job(lang, &out.bitmap, copies)),
+            None => print::print(&self.prefs.printer, &out.bitmap, &self.settings, &self.prefs.cups_extra, copies),
+        };
+        match sent {
             Ok(()) => {
                 let p = self.prefs.printer.clone();
                 let what = if copies > 1 { format!("{copies} copies sent to {p}") } else { format!("Sent to {p}") };
@@ -838,6 +897,15 @@ impl App {
                     } else {
                         self.do_print();
                     }
+                }
+                {
+                    let r = self.resolved_printer();
+                    let mode = match self.raw_lang() {
+                        Some(l) => format!("Direct {} (experimental)", l.name()),
+                        None => "Through the printer driver".to_string(),
+                    };
+                    let model = r.profile.map_or("Custom printer".to_string(), |p| p.name.split(" (").next().unwrap_or(p.name).to_string());
+                    ui.label(RichText::new(format!("{model} · {} dpi · {mode}", r.dpi)).font(theme::body(11.0)).color(t.text_faint));
                 }
                 ui.horizontal(|ui| {
                     let half = (ui.available_width() - 8.0) / 2.0;
@@ -1765,13 +1833,25 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.prefs.height_mm).range(20.0..=300.0).speed(0.1).suffix(" mm"));
         });
         section(ui, t, "Printer", None);
-        setting_row(ui, t, "Resolution", Some("The PB41 prints at 203 dpi"), |ui| {
-            egui::ComboBox::from_id_salt("dpi").selected_text(format!("{} dpi", self.prefs.dpi)).show_ui(ui, |ui| {
-                for d in [203.0, 300.0] {
-                    ui.selectable_value(&mut self.prefs.dpi, d, format!("{d} dpi"));
-                }
-            });
+        let r = self.resolved_printer();
+        let sub = match r.profile {
+            Some(p) => format!("Set by the printer model ({}). Change it under Printing.", p.name),
+            None => "Custom printer: match your printer's resolution".to_string(),
+        };
+        setting_row(ui, t, "Resolution", Some(&sub), |ui| {
+            if r.profile.is_some() {
+                ui.label(RichText::new(format!("{} dpi", r.dpi)).font(theme::mono(12.5)).color(t.text_muted));
+            } else {
+                egui::ComboBox::from_id_salt("dpi").selected_text(format!("{} dpi", self.prefs.dpi)).show_ui(ui, |ui| {
+                    for d in [203.0, 300.0] {
+                        ui.selectable_value(&mut self.prefs.dpi, d, format!("{d} dpi"));
+                    }
+                });
+            }
         });
+        if let Some(p) = r.profile.filter(|p| self.prefs.width_mm > p.head_mm) {
+            note(ui, t, &format!("This printer prints at most {} mm wide, so the label is fitted to that width.", p.head_mm));
+        }
         setting_row(ui, t, "Edge margin", Some("Blank border around the content. Smaller = bigger, sharper print; 0 can clip edges if labels feed slightly off"), |ui| {
             ui.add(egui::DragValue::new(&mut self.prefs.margin_mm).range(0.0..=8.0).speed(0.1).suffix(" mm"));
         });
@@ -1832,6 +1912,58 @@ impl App {
         if ui.button("Refresh printer list").clicked() {
             self.printers = print::list_printers();
         }
+        section(ui, t, "Printer model", Some("Sets resolution and print width so barcodes land on the printer's real dots."));
+        let r = self.resolved_printer();
+        let label_for = |id: &str| -> String {
+            match id {
+                "auto" => match printers::detect(&self.prefs.printer) {
+                    Some(p) => format!("Automatic: {}", p.name),
+                    None => "Automatic: not recognised (custom)".into(),
+                },
+                "custom" => "Custom (set resolution under Label)".into(),
+                id => printers::by_id(id).map_or(id.to_string(), |p| p.name.to_string()),
+            }
+        };
+        setting_row(ui, t, "Model", None, |ui| {
+            egui::ComboBox::from_id_salt("printer-model").width(280.0).selected_text(label_for(&self.prefs.printer_profile)).show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.prefs.printer_profile, "auto".to_string(), label_for("auto"));
+                for p in printers::PROFILES {
+                    ui.selectable_value(&mut self.prefs.printer_profile, p.id.to_string(), p.name);
+                }
+                ui.selectable_value(&mut self.prefs.printer_profile, "custom".to_string(), label_for("custom"));
+            });
+        });
+        if let Some(p) = r.profile {
+            let lang = p.raw.map_or("driver only".to_string(), |l| format!("speaks {}", l.name()));
+            let tested = if p.tested { "tested on hardware" } else { "from manufacturer specs, not yet tested" };
+            note(ui, t, &format!("{} dpi · prints up to {} mm wide · {lang} · {tested}", r.dpi, p.head_mm));
+        }
+
+        section(ui, t, "Direct printing (experimental)", Some("Send the label in the printer's own language instead of through its driver. Avoids driver scaling and margins."));
+        let choices = [("off", "Off (use the driver)"), ("auto", "Automatic"), ("zpl", "ZPL"), ("tspl", "TSPL")];
+        let name_of = |id: &str| choices.iter().find(|c| c.0 == id).map_or("Off", |c| c.1);
+        setting_row(ui, t, "Language", None, |ui| {
+            egui::ComboBox::from_id_salt("raw-mode").width(200.0).selected_text(name_of(&self.prefs.raw_mode)).show_ui(ui, |ui| {
+                for (id, name) in choices {
+                    ui.selectable_value(&mut self.prefs.raw_mode, id.to_string(), name);
+                }
+            });
+        });
+        match (self.prefs.raw_mode.as_str(), self.raw_lang()) {
+            ("off", _) => {}
+            ("auto", None) => note(ui, t, "This printer model has no known language, so the driver is used."),
+            (_, Some(l)) => note(ui, t, &format!("Printing in {}. Untested on most printers: if the result is blank, inverted or upside down, switch back to Off and tell us your model.", l.name())),
+            _ => {}
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Save a test job:").font(theme::body(12.0)).color(t.text_muted));
+            if ui.button("ZPL…").clicked() {
+                self.save_raw(RawLang::Zpl);
+            }
+            if ui.button("TSPL…").clicked() {
+                self.save_raw(RawLang::Tspl);
+            }
+        });
         setting_row(ui, t, "Copies", None, |ui| {
             ui.add(egui::DragValue::new(&mut self.prefs.copies).range(1..=20));
         });

@@ -1,7 +1,8 @@
 # LabelCraft
 
-Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm label for a
-203-dpi thermal printer (built for the PeriPage PB41). Then print it straight from the app.
+Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 4 × 6 label for a thermal
+printer (built for the PeriPage PB41, with profiles for Zebra, Rollo, MUNBYN, DYMO and other
+popular shipping printers). Then print it straight from the app. Windows, macOS and Linux.
 
 <p>
   <img src="docs/screenshot-light.png" alt="LabelCraft in light mode: the original letter-size PDF on the left with the label cropped out, the print-ready 4x6 label on the right with its four barcodes outlined in green, and the Print, Adjust and Barcodes cards on the right" width="49%">
@@ -28,7 +29,9 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
    the same symbology identifier, and the same GS1 structure. If it doesn't, the
    original is restored and the panel shows why.
 5. **Prints.** On Windows it prints through GDI at the driver's real resolution. On macOS
-   it sends an exact-size PDF to CUPS with scaling turned off.
+   and Linux it sends an exact-size PDF to CUPS with scaling turned off. Printers that
+   speak ZPL or TSPL can optionally get the label directly in their own language
+   (see *Printers* below).
 
 6. **Optionally re-typesets text (off by default).** For blurry images and scans, *Text
    (OCR)* in Settings reads each line and redraws it in Liberation Sans. Because a misread
@@ -89,6 +92,32 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
   differently, enter it under *Extra CUPS options*, for example `media=<name>`.
   `lpoptions -p <printer> -l` lists the names.
 
+## Printers
+
+LabelCraft recognises the printer from its name and draws the label at that printer's real
+resolution (203 or 300 dpi) and print width, so barcodes land exactly on its dots. You can
+also pick the model by hand in *Settings → Printing*.
+
+| Printer | Resolution | Direct printing | Status |
+|---|---|---|---|
+| PeriPage PB41 | 203 dpi | driver only | **tested** |
+| Zebra (GK420d, ZD411/421, ZD620, ZSB…) | 203 / 300 dpi | ZPL | specs only |
+| Rollo (USB / Wireless) | 203 dpi | driver | specs only |
+| MUNBYN (ITPP941, RW401/403…) | 203 / 300 dpi | TSPL | specs only |
+| iDPRT / Polono (SP410, SP420, PL420…) | 203 / 300 dpi | TSPL | specs only |
+| Jadens, Nelko, Phomemo | 203 dpi | driver | specs only |
+| DYMO LabelWriter 4XL / 5XL | 300 dpi | driver | specs only |
+| Brother QL-1100 / QL-1110 | 300 dpi | driver | specs only |
+
+"Specs only" means the profile comes from the manufacturer's specifications: nobody has
+printed on that model with LabelCraft yet. A 300 dpi model is picked when the printer's
+name contains "300" (Zebra drivers name themselves that way).
+
+**Direct printing (experimental)** sends a ZPL or TSPL job straight to the printer instead
+of going through its driver, which avoids driver scaling and margin quirks. It is off by
+default. If you try it, *Settings → Printing → Save a test job* writes the job to a file,
+and an issue saying what came out (fine, blank, inverted, upside down) helps a lot.
+
 ## Command line
 
 ```
@@ -97,6 +126,8 @@ labelcraft --cli input.jpg out.png --no-regen   # clean-up only
 labelcraft --cli input.jpg out.png --ocr        # also re-typeset text, listing each line's outcome
 labelcraft --cli input.jpg out.png --ocr --edit "3=742 EVERGREEN TERRACE"   # retype line 3 by hand
 labelcraft --cli input.pdf out.png --no-vector  # resample the PDF instead of drawing it at printer resolution
+labelcraft --cli input.pdf out.png --dpi 300     # draw for a 300 dpi printer
+labelcraft --cli input.pdf out.png --zpl out.zpl --tspl out.tspl   # also write printer-language jobs
 labelcraft --cli input.pdf out.png --print "PB41"
 ```
 
@@ -117,6 +148,7 @@ engine is compiled from source.
 
 - macOS: `xcode-select --install`, then `brew install cmake`
 - Windows: Visual Studio Build Tools with *Desktop development with C++* (includes CMake)
+- Linux: `build-essential` and `cmake` (Debian/Ubuntu); nothing else is needed to build
 
 ```
 cargo build --release
@@ -124,10 +156,11 @@ cargo build --release
 
 The first build takes a few minutes (C++).
 
-**Releases:** every push to `main` builds `LabelCraft.exe` (Windows x64) and `LabelCraft.app`
-(Apple Silicon) on GitHub Actions. When the `version` in `Cargo.toml` doesn't have a release
-yet, the same run publishes one (`v<version>`) with both zips attached, so to ship a new
-version, bump the version and push.
+**Releases:** every push to `main` builds `LabelCraft.exe` (Windows x64), a universal
+`LabelCraft.app` (Apple Silicon and Intel) and Linux x86_64 as an AppImage and a `.tar.gz`
+on GitHub Actions. When the `version` in `Cargo.toml` doesn't have a release yet, the same
+run publishes one (`v<version>`) with all of them attached, so to ship a new version, bump
+the version and push.
 
 The macOS app is ad-hoc signed. On first launch, right-click it and choose **Open**.
 
@@ -147,7 +180,8 @@ The macOS app is ad-hoc signed. On first launch, right-click it and choose **Ope
 | `src/pipeline.rs` | Loading (PDF via hayro, images with EXIF rotation), auto-crop, deskew, orientation, fit, PDF redraw at the dot grid, thresholding |
 | `src/ocr.rs` | Opt-in OCR re-typesetting with double reads, barcode cross-checks and read-back verification |
 | `src/barcodes.rs` | Detection, isolated-blob second pass, exact re-encoding, verification and rollback |
-| `src/print.rs` | Windows GDI printing, CUPS `lp` on macOS/Linux |
+| `src/print.rs` | Windows GDI printing, CUPS `lp` on macOS/Linux, raw jobs to either |
+| `src/printers.rs` | Printer profiles, auto-detection, ZPL and TSPL job writers |
 | `src/pdfout.rs` | Exact-size 1-bit PDF and PNG with DPI metadata |
 | `src/gui.rs` | The window: canvas with the original and the label, inspector cards, toasts, shortcuts |
 | `src/theme.rs` | Design tokens (light "Paper" and dark "Night Shift"), fonts, icons |

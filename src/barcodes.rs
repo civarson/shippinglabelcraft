@@ -167,6 +167,23 @@ pub fn reading_angle(img: &GrayImage) -> Option<f32> {
 fn find_all(work: &GrayImage, ws: u32, bitmap: &GrayImage) -> Vec<Hit> {
     let (bw, bh) = bitmap.dimensions();
     let mut hits: Vec<Hit> = read(work, &READ_FORMATS).into_iter().map(|b| Hit::new(b, (0.0, 0.0))).collect();
+    // At 300 dpi the working image of a low-resolution source is heavily upscaled and
+    // soft; a half-size pass often finds codes the full-size one misses.
+    for target in [1600u32, 1200] {
+        if work.width() <= target + 200 {
+            continue;
+        }
+        let k = work.width() as f32 / target as f32;
+        let small = imageops::resize(work, target, (work.height() as f32 / k).round() as u32, imageops::FilterType::Triangle);
+        for b in read(&small, &READ_FORMATS) {
+            let mut h = Hit::new(b, (0.0, 0.0));
+            h.quad.iter_mut().for_each(|p| *p = (p.0 * k, p.1 * k));
+            let r = bbox(&h.quad, ws as f32, bw, bh);
+            if !hits.iter().any(|k| overlap(bbox(&k.quad, ws as f32, bw, bh), r) > 0.5) {
+                hits.push(h);
+            }
+        }
+    }
 
     // Blobs on the 1-bit label: dilate ink slightly so a 2D symbol becomes one component.
     let dark: Vec<bool> = bitmap.as_raw().iter().map(|&p| p < 128).collect();

@@ -8,6 +8,7 @@ mod widgets;
 mod pdfout;
 mod pipeline;
 mod print;
+mod printers;
 
 use std::path::PathBuf;
 
@@ -48,6 +49,9 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--ocr") {
         s.ocr = true;
     }
+    if let Some(i) = args.iter().position(|a| a == "--dpi") {
+        s.dpi = args.get(i + 1).and_then(|v| v.parse().ok()).ok_or_else(|| anyhow::anyhow!("--dpi needs a number"))?;
+    }
     let src = pipeline::Source::open(&PathBuf::from(input))?;
     let page = src.render_page(0)?;
     let mut o = pipeline::process(&page, &s)?;
@@ -75,6 +79,15 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
     let out = PathBuf::from(out);
     std::fs::write(&out, pdfout::label_png(&o.bitmap, s.dpi)?)?;
     std::fs::write(out.with_extension("pdf"), pdfout::label_pdf(&o.bitmap, s.width_mm, s.height_mm))?;
+    // --zpl out.zpl / --tspl out.tspl: write a printer-language job instead of (or as well as) PNG/PDF.
+    if let Some(i) = args.iter().position(|a| a == "--zpl") {
+        let p = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--zpl needs a file"))?;
+        std::fs::write(p, printers::to_zpl(&o.bitmap, s.darkness, 1))?;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--tspl") {
+        let p = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--tspl needs a file"))?;
+        std::fs::write(p, printers::to_tspl(&o.bitmap, s.width_mm, s.height_mm, s.darkness, 1))?;
+    }
     if let Some(i) = args.iter().position(|a| a == "--print") {
         let printer = args.get(i + 1).cloned().or_else(print::default_printer).unwrap_or_default();
         print::print(&printer, &o.bitmap, &s, "", 1)?;

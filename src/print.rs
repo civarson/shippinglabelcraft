@@ -22,6 +22,12 @@ pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra_cups_options
     Ok(())
 }
 
+/// Send a ready-made printer-language job (ZPL/TSPL) straight to the printer,
+/// bypassing the driver's rendering.
+pub fn print_raw(printer: &str, job: &[u8]) -> Result<()> {
+    imp::print_raw(printer, job)
+}
+
 #[cfg(not(windows))]
 mod imp {
     use super::*;
@@ -41,6 +47,21 @@ mod imp {
         let o = Command::new("lpstat").arg("-d").output().ok()?;
         let s = String::from_utf8_lossy(&o.stdout);
         s.split(':').nth(1).map(|n| n.trim().to_string()).filter(|n| !n.is_empty())
+    }
+
+    pub fn print_raw(printer: &str, job: &[u8]) -> Result<()> {
+        let path = std::env::temp_dir().join(format!("labelcraft-{}.prn", std::process::id()));
+        std::fs::write(&path, job).context("writing temporary print job")?;
+        let out = Command::new("lp")
+            .args(["-d", printer, "-t", "Shipping label", "-o", "raw"])
+            .arg(&path)
+            .output()
+            .context("running lp (is CUPS available?)")?;
+        let _ = std::fs::remove_file(&path);
+        if !out.status.success() {
+            return Err(anyhow!("lp failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(())
     }
 
     pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra: &str) -> Result<()> {
@@ -120,6 +141,33 @@ mod imp {
                 return None;
             }
             Some(from_wide(buf.as_ptr()))
+        }
+    }
+
+    pub fn print_raw(printer: &str, job: &[u8]) -> Result<()> {
+        unsafe {
+            let name = wide(printer);
+            let mut h = PRINTER_HANDLE::default();
+            if OpenPrinterW(name.as_ptr(), &mut h, null()) == 0 {
+                bail!("couldn't open printer {printer}");
+            }
+            let mut doc_name = wide("Shipping label");
+            let mut datatype = wide("RAW");
+            let info = DOC_INFO_1W { pDocName: doc_name.as_mut_ptr(), pOutputFile: null_mut(), pDatatype: datatype.as_mut_ptr() };
+            if StartDocPrinterW(h, 1, &info) == 0 {
+                ClosePrinter(h);
+                bail!("the printer refused a raw job");
+            }
+            StartPagePrinter(h);
+            let mut written = 0u32;
+            let ok = WritePrinter(h, job.as_ptr() as *const _, job.len() as u32, &mut written);
+            EndPagePrinter(h);
+            EndDocPrinter(h);
+            ClosePrinter(h);
+            if ok == 0 || written as usize != job.len() {
+                bail!("only {written} of {} bytes reached the printer", job.len());
+            }
+            Ok(())
         }
     }
 
