@@ -426,11 +426,14 @@ fn raised_parts(parts: &[Rect]) -> Vec<Rect> {
     bottoms.sort_unstable();
     heights.sort_unstable();
     let baseline = bottoms[bottoms.len() / 2] as f32;
+    let mut tops: Vec<u32> = parts.iter().map(|p| p.1).collect();
+    tops.sort_unstable();
+    let cap_top = tops[tops.len() / 2] as f32;
     let h = heights[heights.len() / 2] as f32;
     parts
         .iter()
         .copied()
-        .filter(|p| ((p.1 + p.3) as f32) < baseline - 0.3 * h && (p.3 as f32) < 0.75 * h)
+        .filter(|p| ((p.1 + p.3) as f32) < baseline - 0.3 * h && (p.3 as f32) < 0.75 * h && (p.3 as f32) > 0.35 * h && (p.1 as f32) < cap_top + 0.2 * h)
         .collect()
 }
 
@@ -448,8 +451,10 @@ fn with_superscripts(text: &str, ink: Rect, parts: &[Rect]) -> Result<String, St
     }
     let at_end = raised.iter().all(|r| r.0 as f32 >= ink.0 as f32 + ink.2 as f32 * 0.8);
     match text.strip_suffix("TM") {
-        Some(rest) if at_end => Ok(format!("{}™", rest.trim_end())),
-        _ => Err("has superscript characters".into()),
+        Some(rest) if at_end && raised.len() >= 2 => Ok(format!("{}™", rest.trim_end())),
+        // Hyphens, apostrophes and the like also sit above the baseline. A real superscript
+        // OCR flattened (®, ¹) is caught later: the redrawn line won't have it raised.
+        _ => Ok(text.to_string()),
     }
 }
 
@@ -483,6 +488,12 @@ fn draw_line(e: &Engine, text: &str, core: Rect, b: Rect, bitmap: &mut GrayImage
     let check = recognise(e, &crop_pad(bitmap, b, 4)).map(|r| r.text);
     if check.as_deref() == Some(as_read(text).as_str()) && raised_parts(&line_ink(bitmap, core, b).map(|x| x.1).unwrap_or_default()).len() == raised_parts(&parts).len() {
         Ok(shown.clone())
+    } else if check.as_deref() == Some(as_read(text).as_str()) {
+        if std::env::var_os("LABELCRAFT_DEBUG").is_some() {
+            eprintln!("{text}: before {:?}\n  after {:?}\n  parts {:?}", raised_parts(&parts), raised_parts(&line_ink(bitmap, core, b).map(|x| x.1).unwrap_or_default()), parts);
+        }
+        imageops::replace(bitmap, &backup, b.0 as i64, b.1 as i64);
+        Err("has superscript or raised characters".into())
     } else {
         imageops::replace(bitmap, &backup, b.0 as i64, b.1 as i64);
         Err("re-typeset text didn't read back identically".into())
