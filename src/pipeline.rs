@@ -647,14 +647,18 @@ pub fn auto_crop(src: &GrayImage, is_vector: bool) -> ((u32, u32, u32, u32), Str
         let (mut x0, mut y0, mut x1, mut y1) = (c.x0, c.y0, c.x1, c.y1);
         let reach = ((x1 - x0).max(y1 - y0) as f32 * 0.03).ceil() as u32;
         let frame_area = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f32;
+        let cap = ((x1 - x0).max(y1 - y0) as f32 * 0.15) as u32;
         let mut grew = false;
         loop {
             let mut changed = false;
             for k in &comps {
                 let inside = k.x0 >= x0 && k.y0 >= y0 && k.x1 <= x1 && k.y1 <= y1;
-                let near = k.x0 + reach >= x0 && k.x1 <= x1 + reach && k.y0 + reach >= y0 && k.y1 <= y1 + reach;
+                // Touching or within `reach` of the box (a 2D code poking out counts whole).
+                let near = k.x0 <= x1 + reach && k.x1 + reach >= x0 && k.y0 <= y1 + reach && k.y1 + reach >= y0;
                 let small = (((k.x1 - k.x0 + 1) * (k.y1 - k.y0 + 1)) as f32) < frame_area * 0.1;
-                if !inside && near && small {
+                // Never grow more than ~15% past the printed border on any side.
+                let bounded = k.x0 + cap >= c.x0 && k.x1 <= c.x1 + cap && k.y0 + cap >= c.y0 && k.y1 <= c.y1 + cap;
+                if !inside && near && small && bounded {
                     x0 = x0.min(k.x0);
                     y0 = y0.min(k.y0);
                     x1 = x1.max(k.x1);

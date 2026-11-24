@@ -3,3 +3,4 @@ target/
 *.pdf
 !docs/*.png
 debug_*
+!packaging/**/*.png
