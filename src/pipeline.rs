@@ -380,7 +380,13 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
             let full = render_pdf_with(pdf, m, tw, th);
             let work = render_pdf_with(pdf, m.then(Xf::scale(work_scale as f64, work_scale as f64)), tw * work_scale, th * work_scale);
             match (full, work) {
-                (Some(f), Some(w)) => (w, f),
+                // The page goes on past the crop: blank whatever lies outside it, so nothing
+                // half-cut (a stray code, the next label) sneaks onto the edge.
+                (Some(mut f), Some(mut w)) => {
+                    blank_outside(&mut f, (ox, oy, fw, fh));
+                    blank_outside(&mut w, (ox * work_scale, oy * work_scale, fw * work_scale, fh * work_scale));
+                    (w, f)
+                }
                 _ => resampled(&img, fw, fh, ox, oy, tw, th, work_scale),
             }
         }
@@ -636,9 +642,35 @@ pub fn auto_crop(src: &GrayImage, is_vector: bool) -> ((u32, u32, u32, u32), Str
         })
         .max_by_key(|c| (c.x1 - c.x0) * (c.y1 - c.y0));
     if let Some(c) = frame {
-        let r = up((c.x0, c.y0, c.x1 - c.x0 + 1, c.y1 - c.y0 + 1));
+        // Some carriers print a strip just outside the border (eBay: a restriction notice
+        // and a 2D code under it). Pull in ink sitting right against the frame.
+        let (mut x0, mut y0, mut x1, mut y1) = (c.x0, c.y0, c.x1, c.y1);
+        let reach = ((x1 - x0).max(y1 - y0) as f32 * 0.03).ceil() as u32;
+        let frame_area = ((x1 - x0 + 1) * (y1 - y0 + 1)) as f32;
+        let mut grew = false;
+        loop {
+            let mut changed = false;
+            for k in &comps {
+                let inside = k.x0 >= x0 && k.y0 >= y0 && k.x1 <= x1 && k.y1 <= y1;
+                let near = k.x0 + reach >= x0 && k.x1 <= x1 + reach && k.y0 + reach >= y0 && k.y1 <= y1 + reach;
+                let small = (((k.x1 - k.x0 + 1) * (k.y1 - k.y0 + 1)) as f32) < frame_area * 0.1;
+                if !inside && near && small {
+                    x0 = x0.min(k.x0);
+                    y0 = y0.min(k.y0);
+                    x1 = x1.max(k.x1);
+                    y1 = y1.max(k.y1);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+            grew = true;
+        }
+        let r = up((x0, y0, x1 - x0 + 1, y1 - y0 + 1));
         if r.2 * r.3 < w * h * 95 / 100 {
-            return (r, "Found the label's printed border".into());
+            let note = if grew { "Found the label's printed border (plus the strip printed beside it)" } else { "Found the label's printed border" };
+            return (r, note.into());
         }
     }
 
@@ -713,6 +745,14 @@ pub fn auto_crop(src: &GrayImage, is_vector: bool) -> ((u32, u32, u32, u32), Str
         }
     }
     (full, "Using the whole image".into())
+}
+
+fn blank_outside(img: &mut GrayImage, (x, y, w, h): (u32, u32, u32, u32)) {
+    for (px, py, p) in img.enumerate_pixels_mut() {
+        if px < x || py < y || px >= x + w || py >= y + h {
+            p[0] = 255;
+        }
+    }
 }
 
 fn area_of(w: u32, h: u32) -> f32 {

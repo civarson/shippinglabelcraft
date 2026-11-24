@@ -94,8 +94,13 @@ pub fn icon_button(ui: &mut Ui, t: &Tokens, icon: &str, tip: &str, size: f32) ->
         p.rect_filled(rect, R_CONTROL, t.sunken.gamma_multiply(hover));
     }
     let s = (size * 0.5).round();
-    theme::paint_icon(ui, icon, Rect::from_center_size(rect.center(), Vec2::splat(s)), lerp(t.text_muted, t.text, hover));
-    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    let color = if ui.is_enabled() { lerp(t.text_muted, t.text, hover) } else { t.text_faint.gamma_multiply(0.6) };
+    theme::paint_icon(ui, icon, Rect::from_center_size(rect.center(), Vec2::splat(s)), color);
+    if ui.is_enabled() {
+        resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp.on_disabled_hover_text(tip)
+    }
 }
 
 /// iOS-style toggle with a label and optional caption.

@@ -45,8 +45,9 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
    With OCR on, **click any line on the label to edit it in place**. Your text is drawn at
    the line's size and weight, grows into blank space beside it (or squeezes, down to 70%),
    and is read back to check it. Numbers that are also in a barcode (like the ZIP) can't be
-   changed. A tracking number opens a **double-check dialog** whenever you change it or the
-   reader was less than 90% sure: it shows the original print, what will print, and whether
+   changed. A tracking number (a long number found in a barcode) opens a **double-check
+   dialog** when you change it, or when LabelCraft redrew it while less than 90% sure. Lines
+   left as original print never ask. The dialog shows the original print, what will print, and whether
    it matches the barcode, and Print waits until you confirm. Edits can be undone one by one
    or all at once from the *Text* card.
 

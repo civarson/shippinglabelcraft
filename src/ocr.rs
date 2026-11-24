@@ -512,24 +512,6 @@ fn typeset(font: &FontRef<'static>, text: &str, w: u32, h: u32) -> Option<GrayIm
     Some(out)
 }
 
-/// Length of the longest run of characters `a` and `b` share.
-fn common_run(a: &str, b: &str) -> usize {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    let mut best = 0;
-    let mut prev = vec![0usize; b.len() + 1];
-    for &ca in a {
-        let mut cur = vec![0usize; b.len() + 1];
-        for (j, &cb) in b.iter().enumerate() {
-            if ca == cb {
-                cur[j + 1] = prev[j] + 1;
-                best = best.max(cur[j + 1]);
-            }
-        }
-        prev = cur;
-    }
-    best
-}
-
 fn digits(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()
 }
@@ -578,20 +560,16 @@ pub fn retypeset(
             .text
             .split(|c: char| !c.is_ascii_digit())
             .any(|run| run.len() >= 5 && barcode_digits.iter().any(|bd| bd.contains(run)));
-        let kind = if d.len() >= 12 {
+        // A tracking number is a long number that's also in a barcode. Other long IDs
+        // (label or postage IDs) are just text.
+        let kind = if d.len() >= 12 && barcode_match {
             LineKind::Tracking
         } else if barcode_match || run_in_barcode {
             LineKind::BarcodeNumber
         } else {
             LineKind::Text
         };
-        let tracking_barcode = (kind == LineKind::Tracking).then(|| {
-            barcode_digits
-                .iter()
-                .find(|bd| bd.contains(&d))
-                .or_else(|| barcode_digits.iter().filter(|bd| bd.len() >= 12).max_by_key(|bd| common_run(bd, &d)))
-                .cloned()
-        });
+        let tracking_barcode = (kind == LineKind::Tracking).then(|| barcode_digits.iter().find(|bd| bd.contains(&d)).cloned());
         let mut line = OcrLine {
             text: a.text.clone(),
             region: b,

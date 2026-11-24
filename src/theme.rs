@@ -306,7 +306,7 @@ macro_rules! icons {
 icons!(
     "printer", "rotate-ccw", "rotate-cw", "crop", "folder-open", "download", "file-down", "settings-2", "sun", "moon",
     "monitor", "check", "triangle-alert", "scan-barcode", "sparkles", "upload", "refresh-cw", "sticker", "package", "x",
-    "circle-check", "circle-alert", "scissors", "pencil", "undo-2", "lock",
+    "circle-check", "circle-alert", "scissors", "pencil", "undo-2", "redo-2", "lock",
 );
 
 /// A Lucide icon as a white image source, tinted at paint time.

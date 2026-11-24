@@ -135,6 +135,24 @@ struct Verify {
     error: Option<String>,
 }
 
+/// One undo step: the things you change about the open label.
+#[derive(Clone, PartialEq)]
+struct Doc {
+    extra_rotation: u8,
+    manual_crop: Option<(u32, u32, u32, u32)>,
+    darkness: i32,
+    regenerate: bool,
+    edits: BTreeMap<usize, String>,
+    verified: Vec<usize>,
+}
+
+impl Doc {
+    /// The part that needs the label processed again.
+    fn processing(&self) -> (u8, Option<(u32, u32, u32, u32)>, i32, bool) {
+        (self.extra_rotation, self.manual_crop, self.darkness, self.regenerate)
+    }
+}
+
 /// Tracking numbers below this OCR confidence are always double-checked.
 const TRACKING_SURE: f32 = 0.9;
 
@@ -174,6 +192,10 @@ pub struct App {
     editing: Option<Editing>,
     verify: Option<Verify>,
     verified: HashSet<usize>,
+    history: Vec<Doc>,
+    cursor: usize,
+    /// Edits (and checks) to put back once an undo/redo has been re-processed.
+    pending_restore: Option<Doc>,
 }
 
 impl App {
@@ -218,6 +240,9 @@ impl App {
             editing: None,
             verify: None,
             verified: HashSet::new(),
+            history: Vec::new(),
+            cursor: 0,
+            pending_restore: None,
         };
         app.apply_look(&cc.egui_ctx);
         // Handy for screenshots/docs: open straight onto a settings page.
@@ -353,6 +378,9 @@ impl App {
                     self.page = Some(page);
                     self.output = None;
                     self.out_tex = None;
+                    self.history.clear();
+                    self.cursor = 0;
+                    self.pending_restore = None;
                     self.reprocess(ctx);
                 }
                 Msg::Processed { generation, output } if generation == self.generation => {
@@ -385,6 +413,9 @@ impl App {
                                 }
                             }
                         }
+                    }
+                    if let Some(doc) = self.pending_restore.take() {
+                        self.restore_edits(ctx, &doc);
                     }
                     if let Some(n) = std::env::var("LABELCRAFT_DEMO_OPEN").ok().and_then(|v| v.parse::<usize>().ok()) {
                         self.editing = Some(Editing { line: n, buf: self.line_text(n), error: None, focus: true });
@@ -420,10 +451,11 @@ impl App {
         if l.kind != LineKind::Tracking || self.verified.contains(&i) {
             return None;
         }
+        // Only text LabelCraft drew needs checking: original print that was kept is untouched.
         if self.edits.contains_key(&i) {
             Some("You changed it.".into())
-        } else if let LineStatus::Kept(why) = &l.status {
-            Some(format!("LabelCraft kept the original print ({why}), {:.0}% sure of what it says.", l.confidence * 100.0))
+        } else if matches!(l.status, LineStatus::Kept(_)) {
+            None
         } else if l.confidence < TRACKING_SURE {
             Some(format!("The text reader was only {:.0}% sure.", l.confidence * 100.0))
         } else {
@@ -510,6 +542,105 @@ impl App {
         }
         self.verified.clear();
         self.editing = None;
+    }
+
+    // ───────────────────────────── undo / redo ─────────────────────────────
+
+    fn doc(&self) -> Doc {
+        let mut verified: Vec<usize> = self.verified.iter().copied().collect();
+        verified.sort_unstable();
+        Doc {
+            extra_rotation: self.settings.extra_rotation,
+            manual_crop: self.settings.manual_crop,
+            darkness: self.prefs.darkness,
+            regenerate: self.prefs.regenerate,
+            edits: self.edits.iter().map(|(&i, e)| (i, e.text.clone())).collect(),
+            verified,
+        }
+    }
+
+    /// Record a step once the label has settled (nothing processing, nothing being dragged or typed).
+    fn record_history(&mut self, ctx: &egui::Context) {
+        if self.output.is_none() || self.busy || self.dirty || self.pending_restore.is_some() || self.editing.is_some() {
+            return;
+        }
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        let doc = self.doc();
+        if self.history.get(self.cursor) == Some(&doc) {
+            return;
+        }
+        if self.history.is_empty() {
+            self.history.push(doc);
+            self.cursor = 0;
+            return;
+        }
+        // A re-process clears hand edits by design: fold that into the step that caused it.
+        let prev = &self.history[self.cursor];
+        if doc.edits.is_empty() && !prev.edits.is_empty() && doc.processing() == prev.processing() && self.cursor > 0 {
+            let before = &self.history[self.cursor - 1];
+            if before.processing() != doc.processing() {
+                self.history[self.cursor] = doc;
+                return;
+            }
+        }
+        self.history.truncate(self.cursor + 1);
+        self.history.push(doc);
+        if self.history.len() > 200 {
+            self.history.remove(0);
+        }
+        self.cursor = self.history.len() - 1;
+    }
+
+    fn can_undo(&self) -> bool {
+        self.cursor > 0 && !self.busy
+    }
+
+    fn can_redo(&self) -> bool {
+        self.cursor + 1 < self.history.len() && !self.busy
+    }
+
+    fn undo(&mut self, ctx: &egui::Context) {
+        if self.can_undo() {
+            self.cursor -= 1;
+            self.apply_doc(ctx, self.history[self.cursor].clone());
+        }
+    }
+
+    fn redo(&mut self, ctx: &egui::Context) {
+        if self.can_redo() {
+            self.cursor += 1;
+            self.apply_doc(ctx, self.history[self.cursor].clone());
+        }
+    }
+
+    fn apply_doc(&mut self, ctx: &egui::Context, doc: Doc) {
+        self.editing = None;
+        self.verify = None;
+        if doc.processing() != self.doc().processing() {
+            self.settings.extra_rotation = doc.extra_rotation;
+            self.settings.manual_crop = doc.manual_crop;
+            self.prefs.darkness = doc.darkness;
+            self.prefs.regenerate = doc.regenerate;
+            self.sync_settings();
+            self.pending_restore = Some(doc);
+            self.dirty = true;
+        } else {
+            self.restore_edits(ctx, &doc);
+        }
+    }
+
+    /// Put a step's hand edits and tracking checks back on the current label.
+    fn restore_edits(&mut self, ctx: &egui::Context, doc: &Doc) {
+        let edits: BTreeMap<usize, LineEdit> =
+            doc.edits.iter().map(|(&i, t)| (i, LineEdit { text: t.clone(), read_back_ok: true, squeeze: 1.0 })).collect();
+        match self.render_edits(&edits) {
+            Ok((bitmap, edits)) => self.install_edits(ctx, bitmap, edits),
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't restore that step: {e}")),
+        }
+        self.verified = doc.verified.iter().copied().collect();
+        self.verify = None;
     }
 
     fn do_print(&mut self) {
@@ -630,6 +761,14 @@ impl App {
                 ui.add_space(6.0);
                 if widgets::ghost_button(ui, t, "folder-open", "Open…", 92.0, true).on_hover_text(format!("{MOD}O")).clicked() {
                     self.browse(&ctx);
+                }
+                ui.add_space(10.0);
+                let redo_tip = if cfg!(target_os = "macos") { "Redo (⇧⌘Z)".to_string() } else { "Redo (Ctrl Y)".to_string() };
+                if ui.add_enabled_ui(self.can_redo(), |ui| widgets::icon_button(ui, t, "redo-2", &redo_tip, 34.0)).inner.clicked() {
+                    self.redo(&ctx);
+                }
+                if ui.add_enabled_ui(self.can_undo(), |ui| widgets::icon_button(ui, t, "undo-2", &format!("Undo ({MOD}Z)"), 34.0)).inner.clicked() {
+                    self.undo(&ctx);
                 }
             });
         });
@@ -1984,6 +2123,19 @@ impl eframe::App for App {
                 i.key_pressed(egui::Key::Comma) && i.modifiers.command,
             )
         });
+        // Undo/redo, unless a text box has the keyboard (it has its own undo).
+        if !ctx.memory(|m| m.focused().is_some()) && !self.settings_open {
+            let (undo, redo) = ctx.input(|i| {
+                let z = i.key_pressed(egui::Key::Z) && i.modifiers.command;
+                (z && !i.modifiers.shift, (z && i.modifiers.shift) || (i.key_pressed(egui::Key::Y) && i.modifiers.command))
+            });
+            if undo {
+                self.undo(&ctx);
+            } else if redo {
+                self.redo(&ctx);
+            }
+        }
+        self.record_history(&ctx);
         if prefs_key {
             self.settings_open = !self.settings_open;
         }
