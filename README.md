@@ -4,18 +4,11 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
 203-dpi thermal printer (built for the PeriPage PB41). Then print it straight from the app.
 
 <p>
-  <img src="docs/screenshot-light.png" alt="LabelCraft in light mode: the original letter-size PDF on the left with the label cropped out, the print-ready 4x6 label on the right with its three barcodes outlined in green, and the Print, Adjust and Barcodes cards on the right" width="49%">
+  <img src="docs/screenshot-light.png" alt="LabelCraft in light mode: the original letter-size PDF on the left with the label cropped out, the print-ready 4x6 label on the right with its four barcodes outlined in green, and the Print, Adjust and Barcodes cards on the right" width="49%">
   <img src="docs/screenshot-dark.png" alt="The same LabelCraft window in dark mode" width="49%">
 </p>
 
-*Light and dark themes, shown with a made-up test label. It follows your system setting, or pick one with the sun / monitor / moon switch.*
-
-<details>
-<summary>On a real USPS Ground Advantage label (personal details blacked out)</summary>
-
-![LabelCraft 0.1 with a real USPS label, personal details blacked out](docs/screenshot.png)
-
-</details>
+*LabelCraft 0.3 in the Paper and Night Shift themes, shown with a made-up test label. It follows your system setting, or pick a mode with the sun / monitor / moon switch and choose from 15 themes in Settings.*
 
 ## What it does
 
