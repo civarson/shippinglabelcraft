@@ -3,6 +3,10 @@
 Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm label for a
 203-dpi thermal printer (built for the PeriPage PB41). Then print it straight from the app.
 
+![LabelCraft with a USPS Ground Advantage label: the original on the left, the print-ready label on the right, and every barcode regenerated and verified](docs/screenshot.png)
+
+*Personal details in the screenshot have been blacked out.*
+
 ## What it does
 
 1. **Finds the label on the page.** It handles letter-size PDFs with instructions, labels
