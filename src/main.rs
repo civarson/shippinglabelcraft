@@ -50,15 +50,27 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
     }
     let src = pipeline::Source::open(&PathBuf::from(input))?;
     let page = src.render_page(0)?;
-    let o = pipeline::process(&page, &s)?;
+    let mut o = pipeline::process(&page, &s)?;
     for n in &o.notes {
         println!("note: {n}");
     }
     for b in &o.barcodes {
         println!("{}", b.summary());
     }
-    for l in &o.ocr {
-        println!("text {:?} conf {:.2} → {:?}", l.text, l.confidence, l.status);
+    for (i, l) in o.ocr.iter().enumerate() {
+        println!("[{i}] text {:?} conf {:.2} {:?} → {:?}", l.text, l.confidence, l.kind, l.status);
+    }
+    // --edit N=new text: replace OCR line N by hand, as the GUI does.
+    for (i, a) in args.iter().enumerate() {
+        if a != "--edit" {
+            continue;
+        }
+        let Some((n, text)) = args.get(i + 1).and_then(|v| v.split_once('=')) else { anyhow::bail!("--edit needs N=text") };
+        let line = o.ocr.get(n.parse::<usize>()?).ok_or_else(|| anyhow::anyhow!("no line {n}"))?.clone();
+        match ocr::edit_line(&mut o.bitmap, &line, text) {
+            Ok(r) => println!("edit [{n}] {text:?}: reads back {:?}, squeeze {:.2}", r.read_back, r.squeeze),
+            Err(e) => println!("edit [{n}] {text:?} refused: {e}"),
+        }
     }
     let out = PathBuf::from(out);
     std::fs::write(&out, pdfout::label_png(&o.bitmap, s.dpi)?)?;

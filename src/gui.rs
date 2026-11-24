@@ -6,11 +6,13 @@ use eframe::egui::{
     TextureHandle, TextureOptions, Vec2, pos2, vec2,
 };
 use image::GrayImage;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use crate::barcodes::Status;
+use crate::ocr::{LineKind, LineStatus, OcrLine};
 use crate::pipeline::{Output, Settings, Source, SourcePage};
 use crate::theme::{self, R_CARD, R_CONTROL, R_PILL, Tokens};
 use crate::widgets::{self, lerp};
@@ -110,6 +112,32 @@ enum ToastKind {
     Error,
 }
 
+/// A line the user retyped by hand.
+#[derive(Clone)]
+struct LineEdit {
+    text: String,
+    read_back_ok: bool,
+    squeeze: f32,
+}
+
+/// The inline editor over a line on the label.
+struct Editing {
+    line: usize,
+    buf: String,
+    error: Option<String>,
+    focus: bool,
+}
+
+/// The tracking-number double-check dialog.
+struct Verify {
+    line: usize,
+    buf: String,
+    error: Option<String>,
+}
+
+/// Tracking numbers below this OCR confidence are always double-checked.
+const TRACKING_SURE: f32 = 0.9;
+
 struct Toast {
     text: String,
     kind: ToastKind,
@@ -140,6 +168,12 @@ pub struct App {
     /// A freshly loaded label that may be auto-printed once processed.
     auto_print_pending: bool,
     scroll_to_text: bool,
+    /// The label as processed, before any hand edits.
+    base_bitmap: Option<GrayImage>,
+    edits: BTreeMap<usize, LineEdit>,
+    editing: Option<Editing>,
+    verify: Option<Verify>,
+    verified: HashSet<usize>,
 }
 
 impl App {
@@ -179,6 +213,11 @@ impl App {
             comparing: false,
             auto_print_pending: false,
             scroll_to_text: false,
+            base_bitmap: None,
+            edits: BTreeMap::new(),
+            editing: None,
+            verify: None,
+            verified: HashSet::new(),
         };
         app.apply_look(&cc.egui_ctx);
         // Handy for screenshots/docs: open straight onto a settings page.
@@ -327,10 +366,29 @@ impl App {
                     };
                     self.out_tex = Some(ctx.load_texture("label", img, opts));
                     self.before_tex = output.before_ocr.as_ref().map(|b| ctx.load_texture("label-before", gray_to_color(b), opts));
+                    self.base_bitmap = Some(output.bitmap.clone());
                     self.output = Some(*output);
                     self.busy = false;
                     self.ocr_reviewed = false;
                     self.comparing = false;
+                    // Hand edits belong to the label as it was; a re-process starts clean.
+                    self.edits.clear();
+                    self.editing = None;
+                    self.verified.clear();
+                    self.verify = self.tracking_pending().map(|line| Verify { line, buf: self.line_text(line), error: None });
+                    // Handy for screenshots/docs: LABELCRAFT_DEMO_EDIT="N=text;M=text", LABELCRAFT_DEMO_OPEN=N.
+                    if let Ok(demo) = std::env::var("LABELCRAFT_DEMO_EDIT") {
+                        for part in demo.split(';') {
+                            if let Some((n, text)) = part.split_once('=').and_then(|(n, t)| Some((n.parse::<usize>().ok()?, t))) {
+                                if let Err(e) = self.commit_edit(ctx, n, text) {
+                                    self.toast(ToastKind::Error, e);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(n) = std::env::var("LABELCRAFT_DEMO_OPEN").ok().and_then(|v| v.parse::<usize>().ok()) {
+                        self.editing = Some(Editing { line: n, buf: self.line_text(n), error: None, focus: true });
+                    }
                     self.maybe_auto_print();
                 }
                 Msg::Failed { generation, error } if generation == self.generation => {
@@ -345,7 +403,121 @@ impl App {
         }
     }
 
+    // ───────────────────────────── hand edits ─────────────────────────────
+
+    /// Text of line `i` as it is on the label now.
+    fn line_text(&self, i: usize) -> String {
+        self.edits
+            .get(&i)
+            .map(|e| e.text.clone())
+            .or_else(|| self.output.as_ref().and_then(|o| o.ocr.get(i)).map(|l| l.text.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Why tracking line `i` needs a double-check, if it does.
+    fn verify_reason(&self, i: usize) -> Option<String> {
+        let l = self.output.as_ref()?.ocr.get(i)?;
+        if l.kind != LineKind::Tracking || self.verified.contains(&i) {
+            return None;
+        }
+        if self.edits.contains_key(&i) {
+            Some("You changed it.".into())
+        } else if let LineStatus::Kept(why) = &l.status {
+            Some(format!("LabelCraft kept the original print ({why}), {:.0}% sure of what it says.", l.confidence * 100.0))
+        } else if l.confidence < TRACKING_SURE {
+            Some(format!("The text reader was only {:.0}% sure.", l.confidence * 100.0))
+        } else {
+            None
+        }
+    }
+
+    fn tracking_pending(&self) -> Option<usize> {
+        let n = self.output.as_ref().map_or(0, |o| o.ocr.len());
+        (0..n).find(|&i| self.verify_reason(i).is_some())
+    }
+
+    /// Redraw the label from the processed bitmap with `edits` applied.
+    fn render_edits(&self, edits: &BTreeMap<usize, LineEdit>) -> Result<(GrayImage, BTreeMap<usize, LineEdit>), String> {
+        let (Some(out), Some(base)) = (&self.output, &self.base_bitmap) else { return Err("No label open".into()) };
+        let mut bitmap = base.clone();
+        let mut done = BTreeMap::new();
+        for (&i, e) in edits {
+            let line = out.ocr.get(i).ok_or("That line no longer exists")?;
+            let r = crate::ocr::edit_line(&mut bitmap, line, &e.text)?;
+            done.insert(i, LineEdit { text: e.text.clone(), read_back_ok: r.reads_back(&e.text), squeeze: r.squeeze });
+        }
+        Ok((bitmap, done))
+    }
+
+    fn install_edits(&mut self, ctx: &egui::Context, bitmap: GrayImage, edits: BTreeMap<usize, LineEdit>) {
+        let opts = TextureOptions {
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Linear,
+            mipmap_mode: Some(egui::TextureFilter::Linear),
+            ..TextureOptions::LINEAR
+        };
+        self.out_tex = Some(ctx.load_texture("label", gray_to_color(&bitmap), opts));
+        if let Some(out) = &mut self.output {
+            out.bitmap = bitmap;
+        }
+        self.edits = edits;
+    }
+
+    /// Put `text` on line `i`. Numbers that are also in a barcode can't change.
+    fn commit_edit(&mut self, ctx: &egui::Context, i: usize, text: &str) -> Result<(), String> {
+        let text = text.trim().to_string();
+        let Some(line) = self.output.as_ref().and_then(|o| o.ocr.get(i)).cloned() else { return Err("No such line".into()) };
+        if text == self.line_text(i) {
+            return Ok(());
+        }
+        if line.kind == LineKind::BarcodeNumber && crate::ocr::digits_of(&text) != crate::ocr::digits_of(&line.text) {
+            return Err("The numbers on this line are also in a barcode, so they can't change.".into());
+        }
+        let mut edits = self.edits.clone();
+        if text == line.text && matches!(line.status, LineStatus::Retypeset { .. }) {
+            edits.remove(&i);
+        } else {
+            edits.insert(i, LineEdit { text: text.clone(), read_back_ok: true, squeeze: 1.0 });
+        }
+        let (bitmap, edits) = self.render_edits(&edits)?;
+        self.install_edits(ctx, bitmap, edits);
+        if self.prefs.ocr_review {
+            self.ocr_reviewed = false;
+        }
+        if line.kind == LineKind::Tracking {
+            self.verified.remove(&i);
+            self.verify = Some(Verify { line: i, buf: self.line_text(i), error: None });
+        }
+        if let Some(e) = self.edits.get(&i).filter(|e| !e.read_back_ok) {
+            let _ = e;
+            self.toast(ToastKind::Warn, "Changed, but it reads back slightly differently: check it closely");
+        }
+        Ok(())
+    }
+
+    fn undo_edit(&mut self, ctx: &egui::Context, i: usize) {
+        let mut edits = self.edits.clone();
+        edits.remove(&i);
+        if let Ok((bitmap, edits)) = self.render_edits(&edits) {
+            self.install_edits(ctx, bitmap, edits);
+        }
+        self.verified.remove(&i);
+    }
+
+    fn revert_all_edits(&mut self, ctx: &egui::Context) {
+        if let Some(base) = self.base_bitmap.clone() {
+            self.install_edits(ctx, base, BTreeMap::new());
+        }
+        self.verified.clear();
+        self.editing = None;
+    }
+
     fn do_print(&mut self) {
+        if let Some(line) = self.tracking_pending() {
+            self.verify = Some(Verify { line, buf: self.line_text(line), error: None });
+            self.toast(ToastKind::Warn, "Double-check the tracking number first");
+            return;
+        }
         if self.review_pending() {
             self.toast(ToastKind::Warn, "Check the re-typeset text first");
             return;
@@ -398,6 +570,8 @@ impl App {
         let all_ok = !out.barcodes.is_empty() && out.barcodes.iter().all(|b| !matches!(b.status, Status::Kept(_)));
         if !all_ok {
             self.toast(ToastKind::Warn, "Not printed automatically: not every barcode was verified");
+        } else if self.tracking_pending().is_some() {
+            self.toast(ToastKind::Warn, "Not printed automatically: the tracking number needs a double-check");
         } else if self.review_pending() {
             self.toast(ToastKind::Warn, "Not printed automatically: re-typeset text needs a look first");
         } else {
@@ -506,11 +680,21 @@ impl App {
                             self.printers = print::list_printers();
                         }
                     });
+                let tracking = self.tracking_pending();
                 let pending = self.review_pending();
-                let (icon, label) = if pending { ("sparkles", "Check the text first") } else { ("printer", "Print label") };
+                let (icon, label) = if tracking.is_some() {
+                    ("circle-alert", "Check the tracking number")
+                } else if pending {
+                    ("sparkles", "Check the text first")
+                } else {
+                    ("printer", "Print label")
+                };
                 let copies = if self.prefs.copies > 1 { format!("×{}  {MOD}P", self.prefs.copies) } else { format!("{MOD}P") };
-                if widgets::primary_button(ui, t, icon, label, (!pending).then_some(copies.as_str()), ready).clicked() {
-                    if pending {
+                let blocked = pending || tracking.is_some();
+                if widgets::primary_button(ui, t, icon, label, (!blocked).then_some(copies.as_str()), ready).clicked() {
+                    if let Some(line) = tracking {
+                        self.verify = Some(Verify { line, buf: self.line_text(line), error: None });
+                    } else if pending {
                         self.scroll_to_text = true;
                     } else {
                         self.do_print();
@@ -595,13 +779,13 @@ impl App {
     }
 
     fn text_card(&mut self, ui: &mut egui::Ui, t: &Tokens) {
-        use crate::ocr::LineStatus;
         let Some(out) = &self.output else { return };
         let done = out.ocr.iter().filter(|l| matches!(l.status, LineStatus::Retypeset { .. })).count();
         let total = out.ocr.len();
         let pending = self.review_pending();
         let mut reviewed_click = false;
         let mut compare = false;
+        let (mut revert_all, mut undo_click, mut edit_click) = (false, None, None);
         if std::mem::take(&mut self.scroll_to_text) {
             ui.scroll_to_cursor(Some(Align::TOP));
         }
@@ -645,25 +829,72 @@ impl App {
                         }
                     });
                 }
-                for l in &out.ocr {
-                    let (ok, detail) = match &l.status {
-                        LineStatus::Retypeset { barcode_match: true } => (true, "Redrawn · matches a barcode".to_string()),
-                        LineStatus::Retypeset { .. } => (true, format!("Redrawn · {:.0}% sure, read twice", l.confidence * 100.0)),
-                        LineStatus::Kept(why) => (false, format!("Original kept · {why}")),
+                if !self.edits.is_empty() {
+                    ui.horizontal(|ui| {
+                        let n = self.edits.len();
+                        ui.label(RichText::new(format!("{n} line{} edited by hand", if n == 1 { "" } else { "s" })).font(theme::medium(12.0)).color(t.text));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("Revert all").font(theme::medium(12.0)).color(t.accent)).frame(false)).clicked() {
+                                revert_all = true;
+                            }
+                        });
+                    });
+                }
+                for (i, l) in out.ocr.iter().enumerate() {
+                    let edit = self.edits.get(&i);
+                    let (ok, detail) = match (&l.status, edit) {
+                        (_, Some(e)) => {
+                            let mut d = format!("Edited · was {}", l.text);
+                            if e.squeeze < 0.99 {
+                                d.push_str(&format!(" · squeezed to {:.0}%", e.squeeze * 100.0));
+                            }
+                            if !e.read_back_ok {
+                                d.push_str(" · reads back differently");
+                            }
+                            (true, d)
+                        }
+                        (LineStatus::Retypeset { barcode_match: true }, _) => (true, "Redrawn · matches a barcode".to_string()),
+                        (LineStatus::Retypeset { .. }, _) => (true, format!("Redrawn · {:.0}% sure, read twice", l.confidence * 100.0)),
+                        (LineStatus::Kept(why), _) => (false, format!("Original kept · {why}")),
                     };
+                    let shown = edit.map_or(l.text.as_str(), |e| e.text.as_str());
                     ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                        ui.painter().circle_filled(r.center(), 4.0, if ok { t.accent } else { t.text_faint });
+                        let dot = if edit.is_some() { t.accent } else if ok { t.accent.gamma_multiply(0.5) } else { t.warn };
+                        ui.painter().circle_filled(r.center(), 4.0, dot);
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add(egui::Label::new(RichText::new(&l.text).font(theme::mono(12.0)).color(if ok { t.text } else { t.text_muted })).truncate());
-                            ui.label(RichText::new(detail).font(theme::body(10.5)).color(t.text_faint));
+                            ui.set_max_width(ui.available_width() - 30.0);
+                            let resp = ui.add(egui::Label::new(RichText::new(shown).font(theme::mono(12.0)).color(if ok { t.text } else { t.text_muted })).truncate().sense(Sense::click()));
+                            if resp.on_hover_text("Click to edit on the label").clicked() {
+                                edit_click = Some(i);
+                            }
+                            ui.add(egui::Label::new(RichText::new(detail).font(theme::body(10.5)).color(t.text_faint)).truncate());
                         });
+                        if edit.is_some() {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if widgets::icon_button(ui, t, "undo-2", "Undo this edit", 24.0).clicked() {
+                                    undo_click = Some(i);
+                                }
+                            });
+                        }
                     });
                 }
             },
         );
         self.comparing = compare;
+        let ctx = ui.ctx().clone();
+        if revert_all {
+            self.revert_all_edits(&ctx);
+        }
+        if let Some(i) = undo_click {
+            self.undo_edit(&ctx, i);
+        }
+        if let Some(i) = edit_click {
+            if self.verify.is_none() {
+                self.editing = Some(Editing { line: i, buf: self.line_text(i), error: None, focus: true });
+            }
+        }
         if reviewed_click {
             self.ocr_reviewed = true;
             self.toast(ToastKind::Ok, "Thanks, ready to print");
@@ -865,7 +1096,7 @@ impl App {
         }
     }
 
-    fn label_sheet(&self, ui: &mut egui::Ui, t: &Tokens, rect: Rect) {
+    fn label_sheet(&mut self, ui: &mut egui::Ui, t: &Tokens, rect: Rect) {
         let sub = format!("{} × {} mm · exactly what the printer gets", self.settings.width_mm, self.settings.height_mm);
         let body = self.sheet_header(ui, t, rect, "Ready to print", &sub);
         let (tw, th) = self.settings.target_size();
@@ -882,13 +1113,58 @@ impl App {
                 p.rect_filled(tag, R_PILL, t.text);
                 p.text(tag.center(), Align2::CENTER_CENTER, "Original", theme::semibold(11.0), t.surface);
             }
-            if let (true, Some(out), false) = (self.prefs.show_outlines, &self.output, self.comparing) {
+            if let (Some(out), false, false) = (&self.output, self.comparing, self.busy) {
                 let k = paper.shrink(2.0).width() / tw as f32;
-                for l in &out.ocr {
-                    if matches!(l.status, crate::ocr::LineStatus::Retypeset { .. }) {
-                        let (x, y, w, h) = l.region;
-                        let r = Rect::from_min_size(paper.min + vec2(2.0, 2.0) + vec2(x as f32, y as f32) * k, vec2(w as f32, h as f32) * k);
-                        p.rect_stroke(r, 3, Stroke::new(1.0, t.accent.gamma_multiply(0.7)), StrokeKind::Outside);
+                let to_screen = |(x, y, w, h): (u32, u32, u32, u32)| {
+                    Rect::from_min_size(paper.min + vec2(2.0, 2.0) + vec2(x as f32, y as f32) * k, vec2(w as f32, h as f32) * k)
+                };
+                let mut clicked = None;
+                for (i, l) in out.ocr.iter().enumerate() {
+                    let r = to_screen(l.region);
+                    let edited = self.edits.contains_key(&i);
+                    let kept = matches!(l.status, LineStatus::Kept(_)) && !edited;
+                    let open = self.editing.as_ref().is_some_and(|e| e.line == i);
+                    let resp = ui.interact(r, ui.scope_id().with(("ocr-line", i)), Sense::click());
+                    let hover = resp.hovered() && self.editing.is_none() && self.verify.is_none();
+                    if hover {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                        let tip = match (l.kind, kept) {
+                            (LineKind::Tracking, _) => "Tracking number · click to edit (you'll be asked to double-check)",
+                            (LineKind::BarcodeNumber, _) => "Click to edit · its numbers are in a barcode and stay fixed",
+                            (_, true) => "Original kept · click to type it",
+                            _ => "Click to edit",
+                        };
+                        resp.clone().on_hover_text(tip);
+                    }
+                    if resp.clicked() && self.editing.is_none() && self.verify.is_none() {
+                        clicked = Some(i);
+                    }
+                    let stroke = if open || hover {
+                        Some(Stroke::new(1.5, t.accent))
+                    } else if edited {
+                        Some(Stroke::new(1.5, t.accent.gamma_multiply(0.85)))
+                    } else if !self.prefs.show_outlines {
+                        None
+                    } else if kept {
+                        Some(Stroke::new(1.0, t.warn))
+                    } else {
+                        Some(Stroke::new(1.0, t.accent.gamma_multiply(0.45)))
+                    };
+                    if let Some(st) = stroke {
+                        if kept && !(open || hover) {
+                            dashed_round_rect(&p, r.expand(1.5), 3.0, st);
+                        } else {
+                            p.rect_stroke(r.expand(1.5), 3, st, StrokeKind::Outside);
+                        }
+                    }
+                }
+                if let Some(i) = clicked {
+                    self.editing = Some(Editing { line: i, buf: self.line_text(i), error: None, focus: true });
+                }
+                if let Some(line) = self.editing.as_ref().map(|e| e.line) {
+                    if let Some(l) = self.output.as_ref().and_then(|o| o.ocr.get(line)) {
+                        let anchor = to_screen(l.region);
+                        self.line_editor(ui.ctx(), t, anchor);
                     }
                 }
             }
@@ -914,6 +1190,228 @@ impl App {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(pos2(pill.left() + 26.0, c.y), Vec2::splat(18.0))));
             child.add(egui::Spinner::new().size(18.0).color(t.accent));
             p.text(pos2(pill.left() + 44.0, c.y), Align2::LEFT_CENTER, "Crafting your label…", theme::medium(13.0), t.text);
+        }
+    }
+
+    /// The inline editor floating over a line on the label.
+    fn line_editor(&mut self, ctx: &egui::Context, t: &Tokens, anchor: Rect) {
+        let Some(ed) = self.editing.as_mut() else { return };
+        let i = ed.line;
+        let Some(line): Option<OcrLine> = self.output.as_ref().and_then(|o| o.ocr.get(i)).cloned() else {
+            self.editing = None;
+            return;
+        };
+        let edited = self.edits.contains_key(&i);
+        let (mut keep, mut cancel, mut undo) = (false, false, false);
+        let width = anchor.width().max(300.0);
+        egui::Area::new(egui::Id::unique("line-editor"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(anchor.left_top() - vec2(10.0, 9.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(t.surface)
+                    .stroke(Stroke::new(1.5, t.accent))
+                    .corner_radius(CornerRadius::same(R_CONTROL + 2))
+                    .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: t.shadow })
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_width(width);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        let te = egui::TextEdit::singleline(&mut ed.buf)
+                            .font(theme::mono(15.0))
+                            .desired_width(width)
+                            .frame(egui::Frame::new().fill(t.sunken).corner_radius(CornerRadius::same(R_CONTROL)).inner_margin(egui::Margin::symmetric(8, 5)));
+                        let r = ui.add(te);
+                        if std::mem::take(&mut ed.focus) {
+                            r.request_focus();
+                        }
+                        let (enter, esc) = ui.input(|inp| (inp.key_pressed(egui::Key::Enter), inp.key_pressed(egui::Key::Escape)));
+                        keep |= enter && (r.has_focus() || r.lost_focus());
+                        cancel |= esc;
+                        let note = match line.kind {
+                            LineKind::Tracking => Some(("circle-alert", "Tracking number: you'll double-check it before printing")),
+                            LineKind::BarcodeNumber => Some(("lock", "Numbers on this line are in a barcode and can't change")),
+                            LineKind::Text => None,
+                        };
+                        if let Some((icon, text)) = note {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Image::new(theme::icon(icon)).tint(t.text_muted).fit_to_exact_size(Vec2::splat(13.0)));
+                                ui.label(RichText::new(text).font(theme::body(11.5)).color(t.text_muted));
+                            });
+                        }
+                        if let Some(err) = &ed.error {
+                            ui.label(RichText::new(err).font(theme::body(11.5)).color(t.danger));
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("OCR read:").font(theme::body(11.5)).color(t.text_faint));
+                            ui.add(egui::Label::new(RichText::new(&line.text).font(theme::mono(11.5)).color(t.text_muted)).truncate());
+                        });
+                        ui.horizontal(|ui| {
+                            for sym in ["™", "®", "©"] {
+                                if ui.add(egui::Button::new(RichText::new(sym).font(theme::mono(13.0)).color(t.text)).fill(t.sunken).min_size(vec2(28.0, 26.0))).on_hover_text("Add at the end").clicked() {
+                                    ed.buf.push_str(sym);
+                                    ed.focus = true;
+                                }
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.add(egui::Button::new(RichText::new("Keep").font(theme::semibold(12.5)).color(t.on_accent)).fill(t.accent).min_size(vec2(64.0, 26.0))).clicked() {
+                                    keep = true;
+                                }
+                                if ui.add(egui::Button::new(RichText::new("Cancel").font(theme::medium(12.5)).color(t.text)).fill(t.sunken).min_size(vec2(64.0, 26.0))).clicked() {
+                                    cancel = true;
+                                }
+                                if edited && ui.add(egui::Button::new(RichText::new("Undo edit").font(theme::medium(12.5)).color(t.text_muted)).frame(false)).clicked() {
+                                    undo = true;
+                                }
+                            });
+                        });
+                    });
+            });
+        if cancel {
+            self.editing = None;
+        } else if undo {
+            self.editing = None;
+            self.undo_edit(ctx, i);
+        } else if keep {
+            let text = self.editing.as_ref().map(|e| e.buf.clone()).unwrap_or_default();
+            match self.commit_edit(ctx, i, &text) {
+                Ok(()) => self.editing = None,
+                Err(e) => {
+                    if let Some(ed) = self.editing.as_mut() {
+                        ed.error = Some(e);
+                        ed.focus = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Double-check a tracking number: original print, what will be printed, and the barcode.
+    fn verify_dialog(&mut self, ctx: &egui::Context, t: &Tokens) {
+        let Some(v) = self.verify.as_ref() else { return };
+        let i = v.line;
+        let Some(line) = self.output.as_ref().and_then(|o| o.ocr.get(i)).cloned() else {
+            self.verify = None;
+            return;
+        };
+        let reason = self.verify_reason(i).unwrap_or_else(|| "Make sure it matches the original.".into());
+        let now = self.line_text(i);
+        let edited = self.edits.contains_key(&i);
+        let tex = self.before_tex.clone().or_else(|| self.out_tex.clone());
+        let (tw, th) = self.settings.target_size();
+        let (mut confirm, mut redraw, mut undo, mut later) = (false, false, false, false);
+        egui::Modal::new(egui::Id::unique("verify-tracking"))
+            .backdrop_color(Color32::from_black_alpha(90))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.surface)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(CornerRadius::same(R_CARD + 4))
+                    .shadow(egui::Shadow { offset: [0, 18], blur: 48, spread: 0, color: t.shadow })
+                    .inner_margin(egui::Margin::same(20)),
+            )
+            .show(ctx, |ui| {
+                let w = 460.0;
+                ui.set_width(w);
+                ui.spacing_mut().item_spacing.y = 10.0;
+                ui.horizontal(|ui| {
+                    ui.add(egui::Image::new(theme::icon("circle-alert")).tint(t.warn).fit_to_exact_size(Vec2::splat(20.0)));
+                    ui.label(RichText::new("Double-check the tracking number").font(theme::semibold(17.0)).color(t.text));
+                });
+                ui.label(RichText::new(reason).font(theme::body(12.5)).color(t.text_muted));
+
+                ui.label(RichText::new("ORIGINAL").font(theme::semibold(10.5)).color(t.text_faint));
+                if let Some(tex) = &tex {
+                    let (x, y, rw, rh) = line.region;
+                    let pad = 6.0;
+                    let (x0, y0) = ((x as f32 - pad).max(0.0), (y as f32 - pad).max(0.0));
+                    let (x1, y1) = ((x as f32 + rw as f32 + pad).min(tw as f32), (y as f32 + rh as f32 + pad).min(th as f32));
+                    let aspect = (x1 - x0) / (y1 - y0);
+                    let size = vec2(w, (w / aspect).min(110.0));
+                    let size = vec2(size.y * aspect, size.y).min(vec2(w, 110.0));
+                    let (r, _) = ui.allocate_exact_size(vec2(w, size.y + 12.0), Sense::hover());
+                    ui.painter().rect_filled(r, R_CONTROL, Color32::WHITE);
+                    ui.painter().rect_stroke(r, R_CONTROL, Stroke::new(1.0, t.border), StrokeKind::Inside);
+                    let img = Rect::from_center_size(r.center(), size);
+                    let uv = Rect::from_min_max(pos2(x0 / tw as f32, y0 / th as f32), pos2(x1 / tw as f32, y1 / th as f32));
+                    ui.painter().image(tex.id(), img, uv, Color32::WHITE);
+                }
+
+                ui.label(RichText::new(if matches!(line.status, LineStatus::Kept(_)) && !edited { "WHAT IT SAYS (AS READ)" } else { "WILL PRINT AS" }).font(theme::semibold(10.5)).color(t.text_faint));
+                ui.label(RichText::new(&now).font(theme::mono(17.0)).color(t.text));
+
+                if let Some(bd) = &line.barcode_digits {
+                    let d = crate::ocr::digits_of(&now);
+                    let ok = !d.is_empty() && bd.contains(&d);
+                    let (fg, bg, icon, msg) = if ok {
+                        (t.ok, t.ok_soft, "circle-check", "Matches the barcode".to_string())
+                    } else {
+                        (t.danger, t.warn_soft, "triangle-alert", format!("Doesn't match the barcode: {bd}"))
+                    };
+                    egui::Frame::new().fill(bg).corner_radius(CornerRadius::same(R_CONTROL)).inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(egui::Image::new(theme::icon(icon)).tint(fg).fit_to_exact_size(Vec2::splat(14.0)));
+                            ui.label(RichText::new(msg).font(theme::medium(12.0)).color(fg));
+                        });
+                    });
+                }
+
+                ui.label(RichText::new("FIX IT").font(theme::semibold(10.5)).color(t.text_faint));
+                if let Some(v) = self.verify.as_mut() {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut v.buf)
+                            .font(theme::mono(14.0))
+                            .desired_width(w)
+                            .frame(egui::Frame::new().fill(t.sunken).corner_radius(CornerRadius::same(R_CONTROL)).inner_margin(egui::Margin::symmetric(8, 6))),
+                    );
+                    if let Some(err) = &v.error {
+                        ui.label(RichText::new(err).font(theme::body(11.5)).color(t.danger));
+                    }
+                }
+                let changed = self.verify.as_ref().is_some_and(|v| v.buf.trim() != now);
+                let mismatch = line.barcode_digits.as_ref().is_some_and(|bd| {
+                    let d = crate::ocr::digits_of(&now);
+                    d.is_empty() || !bd.contains(&d)
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Later").font(theme::medium(12.5)).color(t.text_muted)).frame(false)).clicked() {
+                        later = true;
+                    }
+                    if edited && ui.add(egui::Button::new(RichText::new("Undo my change").font(theme::medium(12.5)).color(t.text)).fill(t.sunken).min_size(vec2(0.0, 30.0))).clicked() {
+                        undo = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if changed {
+                            if ui.add(egui::Button::new(RichText::new("Redraw with my text").font(theme::semibold(12.5)).color(t.on_accent)).fill(t.accent).min_size(vec2(0.0, 30.0))).clicked() {
+                                redraw = true;
+                            }
+                        } else if ui.add(egui::Button::new(RichText::new(if mismatch { "Keep it anyway" } else { "It matches the label" }).font(theme::semibold(12.5)).color(t.on_accent)).fill(t.accent).min_size(vec2(0.0, 30.0))).clicked() {
+                            confirm = true;
+                        }
+                    });
+                });
+            });
+        if later {
+            self.verify = None;
+        } else if undo {
+            self.undo_edit(ctx, i);
+            let buf = self.line_text(i);
+            self.verify = self.verify_reason(i).map(|_| Verify { line: i, buf, error: None });
+        } else if confirm {
+            self.verified.insert(i);
+            self.verify = self.tracking_pending().map(|line| Verify { line, buf: self.line_text(line), error: None });
+            if self.verify.is_none() {
+                self.toast(ToastKind::Ok, "Tracking number checked");
+            }
+        } else if redraw {
+            let text = self.verify.as_ref().map(|v| v.buf.clone()).unwrap_or_default();
+            if let Err(e) = self.commit_edit(ctx, i, &text) {
+                if let Some(v) = self.verify.as_mut() {
+                    v.error = Some(e);
+                }
+            }
         }
     }
 
@@ -1456,6 +1954,7 @@ impl eframe::App for App {
         lp.hline(screen.x_range(), screen.bottom() - 28.0, Stroke::new(1.0, t.border));
 
         self.settings_window(&ctx, &t);
+        self.verify_dialog(&ctx, &t);
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             egui::Area::new(egui::Id::unique("drop_overlay"))

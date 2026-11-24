@@ -33,13 +33,32 @@ pub enum LineStatus {
     Kept(String),
 }
 
+/// What a line is, as far as editing goes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LineKind {
+    Text,
+    /// Its digits also appear in a barcode (ZIP, ZIP+4…): the digits can't be edited.
+    BarcodeNumber,
+    /// A tracking number (12+ digits). Editable, but always double-checked.
+    Tracking,
+}
+
 #[derive(Clone, Debug)]
 pub struct OcrLine {
     pub text: String,
-    /// Label pixels.
+    /// Label pixels (detector box, expanded).
     pub region: Rect,
+    /// Detector core box: glyphs whose centre lies inside belong to this line.
+    pub core: Rect,
     pub confidence: f32,
     pub status: LineStatus,
+    pub kind: LineKind,
+    /// For tracking numbers: digits of the barcode that best corresponds, if any.
+    pub barcode_digits: Option<String>,
+}
+
+pub fn digits_of(s: &str) -> String {
+    digits(s)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,6 +312,152 @@ fn coverage(img: &GrayImage, r: Rect) -> f32 {
     dark as f32 / (r.2 * r.3).max(1) as f32
 }
 
+/// Ink bounds of `text` laid out from caret 0 on a baseline at the font's ascent.
+fn measure(font: &FontRef<'static>, text: &str, scale: PxScale) -> Option<(f32, f32, f32, f32)> {
+    let sf = font.as_scaled(scale);
+    let (mut caret, mut prev) = (0.0f32, None);
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for ch in text.chars() {
+        let id = sf.glyph_id(ch);
+        if let Some(p) = prev {
+            caret += sf.kern(p, id);
+        }
+        let g = id.with_scale_and_position(scale, point(caret, sf.ascent()));
+        if let Some(o) = font.outline_glyph(g) {
+            let b = o.px_bounds();
+            x0 = x0.min(b.min.x);
+            y0 = y0.min(b.min.y);
+            x1 = x1.max(b.max.x);
+            y1 = y1.max(b.max.y);
+        }
+        caret += sf.h_advance(id);
+        prev = Some(id);
+    }
+    (x1 > x0).then_some((x0, y0, x1, y1))
+}
+
+/// Result of a hand edit.
+#[derive(Clone, Debug)]
+pub struct EditResult {
+    /// What OCR reads back from the redrawn line (None = nothing readable).
+    pub read_back: Option<String>,
+    /// Horizontal squeeze applied to fit the original line's width (1.0 = none).
+    pub squeeze: f32,
+}
+
+impl EditResult {
+    pub fn reads_back(&self, text: &str) -> bool {
+        self.read_back.as_deref().map(as_read) == Some(as_read(text))
+    }
+}
+
+/// Replace one line on `bitmap` with `text`, at the size and weight of what's there now.
+/// Text longer than the line is squeezed down to 70% width; beyond that it's refused.
+pub fn edit_line(bitmap: &mut GrayImage, line: &OcrLine, text: &str) -> Result<EditResult, String> {
+    let e = engine().ok_or("OCR engine failed to load")?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("A line can't be empty".into());
+    }
+    let b = line.region;
+    let (ink, _) = line_ink(bitmap, line.core, b).ok_or("Can't find this line's letters on the label")?;
+    // Size reference: the line as OCR read it, fitted to the ink box now on the label.
+    let reference = if line.text.is_empty() { text } else { line.text.as_str() };
+    let orig_cov = coverage(bitmap, ink);
+    let mut best: Option<(f32, &FontRef<'static>, PxScale)> = None;
+    for font in [&e.regular, &e.bold] {
+        let Some((x0, y0, x1, y1)) = measure(font, reference, PxScale::from(100.0)) else { continue };
+        let sy = 100.0 * ink.3 as f32 / (y1 - y0);
+        let sx = (100.0 * ink.2 as f32 / (x1 - x0)).clamp(sy * 0.7, sy * 1.3);
+        let scale = PxScale { x: sx, y: sy };
+        if let Some(m) = typeset(font, reference, ink.2, ink.3) {
+            let cov = m.pixels().filter(|p| p[0] >= 128).count() as f32 / (ink.2 * ink.3) as f32;
+            let diff = (cov - orig_cov).abs();
+            if best.as_ref().is_none_or(|(d, ..)| diff < *d) {
+                best = Some((diff, font, scale));
+            }
+        }
+    }
+    let (_, font, mut scale) = best.ok_or("The font has no letters for this line")?;
+    let (_, ry0, ..) = measure(font, reference, scale).ok_or("The font has no letters for this line")?;
+    // Clear the old ink first so the free space beside the line can be measured.
+    for y in ink.1..ink.1 + ink.3 {
+        for x in ink.0..ink.0 + ink.2 {
+            bitmap.put_pixel(x, y, Luma([255]));
+        }
+    }
+    // Room to grow: blank columns beside the line (keeping a gap of ~⅓ letter height),
+    // symmetric for centred headings so they stay centred.
+    let (bw, bh) = bitmap.dimensions();
+    let (ry0b, ry1b) = (ink.1.saturating_sub(1), (ink.1 + ink.3 + 1).min(bh));
+    let blank_col = |x: u32| (ry0b..ry1b).all(|y| bitmap.get_pixel(x, y)[0] >= 128);
+    let gap = (ink.3 / 3).max(3);
+    let edge = 4u32;
+    let mut right = ink.0 + ink.2;
+    while right < bw - edge && blank_col(right) {
+        right += 1;
+    }
+    let right_free = right.saturating_sub(ink.0 + ink.2).saturating_sub(if right < bw - edge { gap } else { 0 });
+    let mut left = ink.0;
+    while left > edge && blank_col(left - 1) {
+        left -= 1;
+    }
+    let left_free = ink.0.saturating_sub(left).saturating_sub(if left > edge { gap } else { 0 });
+    let centred = ((ink.0 as f32 + ink.2 as f32 / 2.0) - bw as f32 / 2.0).abs() < bw as f32 * 0.03;
+    let room = if centred { ink.2 + 2 * left_free.min(right_free) } else { ink.2 + right_free };
+
+    let (nx0, _, nx1, _) = measure(font, text, scale).ok_or("The font has no letters for this text")?;
+    let squeeze = (room as f32 / (nx1 - nx0)).min(1.0);
+    if squeeze < 0.7 {
+        return Err(format!("Too long to fit (would need {:.0}% width): shorten it", squeeze * 100.0));
+    }
+    scale.x *= squeeze;
+    let (nx0, _, nx1, _) = measure(font, text, scale).ok_or("The font has no letters for this text")?;
+    let new_w = nx1 - nx0;
+    let start = if centred { ink.0 as f32 + ink.2 as f32 / 2.0 - new_w / 2.0 } else { ink.0 as f32 };
+
+    // Draw from the same top, clipped to the line's band and the room found above.
+    let clip = (
+        (start.floor().max(0.0) as u32).min(ink.0),
+        b.1,
+        0u32,
+        b.3,
+    );
+    let clip_x1 = ((start + new_w).ceil() as u32 + 1).max(ink.0 + ink.2).min(bw);
+    let clip = (clip.0, clip.1, clip_x1 - clip.0, clip.3);
+    let sf = font.as_scaled(scale);
+    let (ox, oy) = (start - nx0, ink.1 as f32 + sf.ascent() - ry0);
+    let (mut caret, mut prev) = (0.0f32, None);
+    let mut cover = GrayImage::new(clip.2, clip.3);
+    for ch in text.chars() {
+        let id = sf.glyph_id(ch);
+        if let Some(p) = prev {
+            caret += sf.kern(p, id);
+        }
+        let g = id.with_scale_and_position(scale, point(ox + caret, oy));
+        if let Some(o) = font.outline_glyph(g) {
+            let bb = o.px_bounds();
+            o.draw(|gx, gy, c| {
+                let (x, y) = (bb.min.x as i64 + gx as i64 - clip.0 as i64, bb.min.y as i64 + gy as i64 - clip.1 as i64);
+                if x >= 0 && y >= 0 && (x as u32) < clip.2 && (y as u32) < clip.3 {
+                    let v = cover.get_pixel(x as u32, y as u32)[0].max((c * 255.0) as u8);
+                    cover.put_pixel(x as u32, y as u32, Luma([v]));
+                }
+            });
+        }
+        caret += sf.h_advance(id);
+        prev = Some(id);
+    }
+    for (x, y, p) in cover.enumerate_pixels() {
+        if p[0] >= 128 {
+            bitmap.put_pixel(clip.0 + x, clip.1 + y, Luma([0]));
+        }
+    }
+    let b = clip;
+    let read_back = recognise(e, &crop_pad(bitmap, b, 4)).map(|r| r.text).filter(|t| !t.is_empty());
+    Ok(EditResult { read_back, squeeze })
+}
+
 /// Typeset `text` so its ink exactly fills a `w`×`h` box. Returns a coverage mask.
 fn typeset(font: &FontRef<'static>, text: &str, w: u32, h: u32) -> Option<GrayImage> {
     // Measure the ink bounds at a reference size, then scale x and y independently.
@@ -347,6 +512,24 @@ fn typeset(font: &FontRef<'static>, text: &str, w: u32, h: u32) -> Option<GrayIm
     Some(out)
 }
 
+/// Length of the longest run of characters `a` and `b` share.
+fn common_run(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut best = 0;
+    let mut prev = vec![0usize; b.len() + 1];
+    for &ca in a {
+        let mut cur = vec![0usize; b.len() + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            if ca == cb {
+                cur[j + 1] = prev[j] + 1;
+                best = best.max(cur[j + 1]);
+            }
+        }
+        prev = cur;
+    }
+    best
+}
+
 fn digits(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_digit()).collect()
 }
@@ -389,9 +572,35 @@ pub fn retypeset(
             continue;
         }
         let confidence = a.mean().min(c.mean());
-        let mut line = OcrLine { text: a.text.clone(), region: b, confidence, status: LineStatus::Kept(String::new()) };
         let d = digits(&a.text);
         let barcode_match = d.len() >= 5 && barcode_digits.iter().any(|bd| bd.contains(&d));
+        let run_in_barcode = a
+            .text
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|run| run.len() >= 5 && barcode_digits.iter().any(|bd| bd.contains(run)));
+        let kind = if d.len() >= 12 {
+            LineKind::Tracking
+        } else if barcode_match || run_in_barcode {
+            LineKind::BarcodeNumber
+        } else {
+            LineKind::Text
+        };
+        let tracking_barcode = (kind == LineKind::Tracking).then(|| {
+            barcode_digits
+                .iter()
+                .find(|bd| bd.contains(&d))
+                .or_else(|| barcode_digits.iter().filter(|bd| bd.len() >= 12).max_by_key(|bd| common_run(bd, &d)))
+                .cloned()
+        });
+        let mut line = OcrLine {
+            text: a.text.clone(),
+            region: b,
+            core,
+            confidence,
+            status: LineStatus::Kept(String::new()),
+            kind,
+            barcode_digits: tracking_barcode.flatten(),
+        };
 
         let refuse = |why: &str| LineStatus::Kept(why.to_string());
         line.status = if a.text != c.text {

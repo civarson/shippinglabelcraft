@@ -42,6 +42,16 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
    into **Check the text first**: hold *Original* to compare, then click *Looks right*.
    PDFs don't need OCR: step 3 already draws their real text.
 
+   With OCR on, **click any line on the label to edit it in place**. Your text is drawn at
+   the line's size and weight, grows into blank space beside it (or squeezes, down to 70%),
+   and is read back to check it. Numbers that are also in a barcode (like the ZIP) can't be
+   changed. A tracking number opens a **double-check dialog** whenever you change it or the
+   reader was less than 90% sure: it shows the original print, what will print, and whether
+   it matches the barcode, and Print waits until you confirm. Edits can be undone one by one
+   or all at once from the *Text* card.
+
+<p align="center"><img src="docs/edit-in-place.png" alt="Editing an address line in place on the label, with Keep and Cancel buttons" width="49%"> <img src="docs/tracking-check.png" alt="The tracking-number double-check dialog warning that an edited number doesn't match the barcode" width="49%"></p>
+
 <p align="center"><img src="docs/text-review.png" alt="LabelCraft in the Catppuccin Mocha theme with re-typeset text lines outlined on the label and the Print button reading 'Check the text first'" width="80%"></p>
 
 ## Using it
@@ -61,7 +71,7 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
   - **Image:** automatic crop / straighten / rotate on or off, drawing PDFs at printer
     resolution, bolder text
   - **Barcodes:** regenerate on or off, prefer thicker bars
-  - **Text (OCR):** opt-in re-typesetting, confidence needed, review before printing
+  - **Text (OCR):** opt-in re-typesetting and in-place editing, confidence needed, review before printing
   - **Printing:** printer, copies, print automatically when a label is ready (only if every
     barcode verified and no text needs checking), save a PNG of every printed label
 
@@ -84,6 +94,7 @@ Drop in a shipping label (PDF, PNG, or JPG) and get a print-ready 100 × 150 mm 
 labelcraft --cli input.pdf out.png              # writes out.png and out.pdf, prints the report
 labelcraft --cli input.jpg out.png --no-regen   # clean-up only
 labelcraft --cli input.jpg out.png --ocr        # also re-typeset text, listing each line's outcome
+labelcraft --cli input.jpg out.png --ocr --edit "3=742 EVERGREEN TERRACE"   # retype line 3 by hand
 labelcraft --cli input.pdf out.png --no-vector  # resample the PDF instead of drawing it at printer resolution
 labelcraft --cli input.pdf out.png --print "PB41"
 ```
