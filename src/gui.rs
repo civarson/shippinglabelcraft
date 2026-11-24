@@ -52,7 +52,12 @@ struct Prefs {
     auto_print: bool,
     archive: bool,
     archive_dir: String,
+    /// Bumped when a default changes enough that saved values should be refreshed.
+    rev: u32,
 }
+
+/// 1: edge margin default 1.5 mm → 0.5 mm.
+const PREFS_REV: u32 = 1;
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -87,6 +92,7 @@ impl Default for Prefs {
             auto_print: false,
             archive: false,
             archive_dir: String::new(),
+            rev: PREFS_REV,
         }
     }
 }
@@ -140,7 +146,14 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         theme::install(&cc.egui_ctx);
-        let prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        let mut prefs: Prefs = cc.storage.and_then(|s| eframe::get_value(s, "prefs")).unwrap_or_default();
+        if prefs.rev < 1 {
+            // Old default margin wasted ~3% of the print width; move untouched values to the new one.
+            if (prefs.margin_mm - 1.5).abs() < 0.01 {
+                prefs.margin_mm = Settings::default().margin_mm;
+            }
+        }
+        prefs.rev = PREFS_REV;
         let (tx, rx) = mpsc::channel();
         let printers = print::list_printers();
         let mut app = Self {
@@ -1122,7 +1135,7 @@ impl App {
                 }
             });
         });
-        setting_row(ui, t, "Edge margin", Some("Blank border kept around the content"), |ui| {
+        setting_row(ui, t, "Edge margin", Some("Blank border around the content. Smaller = bigger, sharper print; 0 can clip edges if labels feed slightly off"), |ui| {
             ui.add(egui::DragValue::new(&mut self.prefs.margin_mm).range(0.0..=8.0).speed(0.1).suffix(" mm"));
         });
         section(ui, t, "Alignment", Some("If prints come out shifted, nudge them back. + moves right / down."));

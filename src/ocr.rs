@@ -217,11 +217,12 @@ fn overlaps(a: Rect, b: Rect) -> bool {
 /// Bounding box of the glyphs belonging to this line: ink components inside the expanded box
 /// whose centre falls inside the detector's core box (so neighbouring lines and rules that
 /// poke into the box are ignored).
-fn line_ink(img: &GrayImage, core: Rect, b: Rect) -> Option<Rect> {
+fn line_ink(img: &GrayImage, core: Rect, b: Rect) -> Option<(Rect, Vec<Rect>)> {
     let (x0, y0, w, h) = b;
     let idx = |x: u32, y: u32| ((y - y0) * w + (x - x0)) as usize;
     let mut seen = vec![false; (w * h) as usize];
     let (mut bx0, mut by0, mut bx1, mut by1) = (u32::MAX, u32::MAX, 0, 0);
+    let mut parts = Vec::new();
     for sy in y0..y0 + h {
         for sx in x0..x0 + w {
             if seen[idx(sx, sy)] || img.get_pixel(sx, sy)[0] >= 128 {
@@ -259,10 +260,11 @@ fn line_ink(img: &GrayImage, core: Rect, b: Rect) -> Option<Rect> {
                 by0 = by0.min(cy0);
                 bx1 = bx1.max(cx1);
                 by1 = by1.max(cy1);
+                parts.push((cx0, cy0, cx1 - cx0 + 1, cy1 - cy0 + 1));
             }
         }
     }
-    (bx1 >= bx0 && by1 >= by0).then(|| (bx0, by0, bx1 - bx0 + 1, by1 - by0 + 1))
+    (bx1 >= bx0 && by1 >= by0).then(|| ((bx0, by0, bx1 - bx0 + 1, by1 - by0 + 1), parts))
 }
 
 #[cfg(any())]
@@ -400,7 +402,10 @@ pub fn retypeset(
             refuse("long number doesn't match any barcode")
         } else {
             match draw_line(e, &a.text, core, b, bitmap) {
-                Ok(()) => LineStatus::Retypeset { barcode_match },
+                Ok(shown) => {
+                    line.text = shown;
+                    LineStatus::Retypeset { barcode_match }
+                }
                 Err(why) => refuse(&why),
             }
         };
@@ -410,8 +415,48 @@ pub fn retypeset(
 }
 
 /// Replace the ink of one line with typeset text, then re-read it; restore on mismatch.
-fn draw_line(e: &Engine, text: &str, core: Rect, b: Rect, bitmap: &mut GrayImage) -> Result<(), String> {
-    let ink = line_ink(bitmap, core, b).ok_or("no ink")?;
+/// Glyph pieces sitting well above the line's baseline and smaller than its letters:
+/// superscripts such as ™, ®, ¹. Returns their boxes.
+fn raised_parts(parts: &[Rect]) -> Vec<Rect> {
+    if parts.len() < 3 {
+        return Vec::new();
+    }
+    let mut bottoms: Vec<u32> = parts.iter().map(|p| p.1 + p.3).collect();
+    let mut heights: Vec<u32> = parts.iter().map(|p| p.3).collect();
+    bottoms.sort_unstable();
+    heights.sort_unstable();
+    let baseline = bottoms[bottoms.len() / 2] as f32;
+    let h = heights[heights.len() / 2] as f32;
+    parts
+        .iter()
+        .copied()
+        .filter(|p| ((p.1 + p.3) as f32) < baseline - 0.3 * h && (p.3 as f32) < 0.75 * h)
+        .collect()
+}
+
+/// OCR reads ™ as "TM"; compare typeset text with a read-back on those terms.
+fn as_read(text: &str) -> String {
+    text.replace('™', "TM")
+}
+
+/// Decide what to typeset for a line whose OCR text is `text`: superscript "TM" becomes ™;
+/// any other superscript makes the line too risky to redraw.
+fn with_superscripts(text: &str, ink: Rect, parts: &[Rect]) -> Result<String, String> {
+    let raised = raised_parts(parts);
+    if raised.is_empty() {
+        return Ok(text.to_string());
+    }
+    let at_end = raised.iter().all(|r| r.0 as f32 >= ink.0 as f32 + ink.2 as f32 * 0.8);
+    match text.strip_suffix("TM") {
+        Some(rest) if at_end => Ok(format!("{}™", rest.trim_end())),
+        _ => Err("has superscript characters".into()),
+    }
+}
+
+fn draw_line(e: &Engine, text: &str, core: Rect, b: Rect, bitmap: &mut GrayImage) -> Result<String, String> {
+    let (ink, parts) = line_ink(bitmap, core, b).ok_or("no ink")?;
+    let shown = with_superscripts(text, ink, &parts)?;
+    let text = shown.as_str();
     if ink.3 as f32 > core.3 as f32 * 2.2 || ink.2 < 4 || ink.3 < 4 {
         return Err("text touches other graphics".into());
     }
@@ -436,8 +481,8 @@ fn draw_line(e: &Engine, text: &str, core: Rect, b: Rect, bitmap: &mut GrayImage
         }
     }
     let check = recognise(e, &crop_pad(bitmap, b, 4)).map(|r| r.text);
-    if check.as_deref() == Some(text) {
-        Ok(())
+    if check.as_deref() == Some(as_read(text).as_str()) && raised_parts(&line_ink(bitmap, core, b).map(|x| x.1).unwrap_or_default()).len() == raised_parts(&parts).len() {
+        Ok(shown.clone())
     } else {
         imageops::replace(bitmap, &backup, b.0 as i64, b.1 as i64);
         Err("re-typeset text didn't read back identically".into())

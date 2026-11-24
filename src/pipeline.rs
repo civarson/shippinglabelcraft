@@ -50,7 +50,7 @@ impl Default for Settings {
             dpi: 203.0,
             width_mm: 100.0,
             height_mm: 150.0,
-            margin_mm: 1.5,
+            margin_mm: 0.5,
             regenerate_barcodes: true,
             darkness: 0,
             extra_rotation: 0,
@@ -339,7 +339,9 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
     // 4. Trim to content and fit onto the label at 2× working resolution.
     let ot = otsu(&img);
     let content = content_bbox(&img, ot.saturating_sub(10).max(40), 2).unwrap_or((0, 0, img.width(), img.height()));
-    let pad = ((img.width().max(img.height())) as f32 * 0.004) as u32;
+    // Keep only about one output dot of slack beyond the ink so anti-aliased edges survive;
+    // anything more is wasted print area.
+    let pad = (img.width() as f32 / tw as f32).max(img.height() as f32 / th as f32).ceil() as u32 + 1;
     let content = clamp_rect(
         (
             content.0.saturating_sub(pad),
