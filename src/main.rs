@@ -2,6 +2,8 @@
 
 mod barcodes;
 mod gui;
+mod theme;
+mod widgets;
 mod pdfout;
 mod pipeline;
 mod print;

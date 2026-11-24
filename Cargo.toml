@@ -1,6 +1,6 @@
 [package]
 name = "labelcraft"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -11,6 +11,7 @@ anyhow = "1"
 png = "0.18"
 zxing-cpp = { version = "0.5.3", features = ["bundled", "image"] }
 eframe = { version = "0.37", features = ["persistence"] }
+egui_extras = { version = "0.37", features = ["svg"] }
 serde = { version = "1", features = ["derive"] }
 rfd = "0.18"
 
