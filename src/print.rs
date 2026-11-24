@@ -14,12 +14,19 @@ pub fn default_printer() -> Option<String> {
     imp::default_printer()
 }
 
-/// Print the 1-bit label on `printer`.
-pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra_cups_options: &str, copies: u32) -> Result<()> {
+/// Print the 1-bit label on `printer`. Returns the driver's resolution (x, y) when known.
+pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra_cups_options: &str, copies: u32) -> Result<Option<(f32, f32)>> {
+    let mut dpi = None;
     for _ in 0..copies.clamp(1, 20) {
-        imp::print(printer, bitmap, s, extra_cups_options)?;
+        dpi = imp::print(printer, bitmap, s, extra_cups_options, None)?;
     }
-    Ok(())
+    Ok(dpi)
+}
+
+/// Run one print through the printer's driver but write what the driver would send to the
+/// printer into `out` instead. Nothing is printed. Used to learn a printer's own commands.
+pub fn capture_driver_output(printer: &str, bitmap: &GrayImage, s: &Settings, extra_cups_options: &str, out: &std::path::Path) -> Result<Option<(f32, f32)>> {
+    imp::print(printer, bitmap, s, extra_cups_options, Some(out))
 }
 
 /// Send a ready-made printer-language job (ZPL/TSPL) straight to the printer,
@@ -64,11 +71,26 @@ mod imp {
         Ok(())
     }
 
-    pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra: &str) -> Result<()> {
+    pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra: &str, capture: Option<&std::path::Path>) -> Result<Option<(f32, f32)>> {
         let pdf = crate::pdfout::label_pdf(bitmap, s.width_mm, s.height_mm);
         let path = std::env::temp_dir().join(format!("labelcraft-{}.pdf", std::process::id()));
         std::fs::write(&path, pdf).context("writing temporary PDF")?;
         let media = format!("media=Custom.{}x{}mm", s.width_mm.round(), s.height_mm.round());
+        if let Some(out_path) = capture {
+            // Run the queue's own filter chain (its PPD) and keep the printer-ready bytes.
+            let mut cmd = Command::new("cupsfilter");
+            cmd.args(["-P", &format!("/etc/cups/ppd/{printer}.ppd"), "-o", &media, "-o", "print-scaling=none"]);
+            for opt in extra.split_whitespace() {
+                cmd.args(["-o", opt]);
+            }
+            let out = cmd.arg(&path).output().context("running cupsfilter")?;
+            let _ = std::fs::remove_file(&path);
+            if !out.status.success() || out.stdout.is_empty() {
+                return Err(anyhow!("cupsfilter failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            }
+            std::fs::write(out_path, &out.stdout).context("writing capture")?;
+            return Ok(None);
+        }
         let mut cmd = Command::new("lp");
         cmd.args(["-d", printer, "-t", "Shipping label", "-o", &media, "-o", "print-scaling=none"])
             .args(["-o", "orientation-requested=3"]);
@@ -81,7 +103,7 @@ mod imp {
         if !out.status.success() {
             return Err(anyhow!("lp failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -212,7 +234,8 @@ mod imp {
         }
     }
 
-    pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, _extra: &str) -> Result<()> {
+    pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, _extra: &str, capture: Option<&std::path::Path>) -> Result<Option<(f32, f32)>> {
+        let capture_w = capture.map(|p| wide(&p.to_string_lossy()));
         let name = wide(printer);
         unsafe {
             let devmode = label_devmode(&name, s);
@@ -221,11 +244,15 @@ mod imp {
             if hdc.is_null() {
                 bail!("couldn't open printer \"{printer}\"");
             }
-            let result = (|| -> Result<()> {
+            let result = (|| -> Result<(f32, f32)> {
                 let title = wide("Shipping label");
                 let mut di: DOCINFOW = std::mem::zeroed();
                 di.cbSize = std::mem::size_of::<DOCINFOW>() as i32;
                 di.lpszDocName = title.as_ptr();
+                // With an output file the driver's bytes go there instead of to the printer.
+                if let Some(c) = &capture_w {
+                    di.lpszOutput = c.as_ptr();
+                }
                 if StartDocW(hdc, &di) <= 0 {
                     bail!("StartDoc failed");
                 }
@@ -295,10 +322,10 @@ mod imp {
                 if EndDoc(hdc) <= 0 {
                     bail!("EndDoc failed");
                 }
-                Ok(())
+                Ok((dpi_x, dpi_y))
             })();
             DeleteDC(hdc);
-            result
+            result.map(Some)
         }
     }
 }

@@ -3,6 +3,16 @@
 All notable changes to LabelCraft. Each release on GitHub uses its section from this file
 as its release notes.
 
+## [0.5.2] - 2026-11-24
+
+### Added
+- **Driver capture** (*Settings → Printing → Capture what the driver sends*): runs one
+  print through the printer's driver and saves the bytes it would send, without printing.
+  This is the first step towards printing to PeriPage printers directly, without the
+  driver. Command line: `--capture <printer> <file>`.
+- A tip when the printer driver uses different horizontal and vertical resolutions, such as
+  PeriPage's "HD" drivers. The "SD" driver gives sharper barcodes.
+
 ## [0.5.1] - 2026-11-24
 
 ### Added
@@ -85,6 +95,7 @@ as its release notes.
 - First release: auto-crop, straighten and rotate shipping labels; redraw and verify every
   barcode; print directly to the PeriPage PB41 on Windows and macOS.
 
+[0.5.2]: https://github.com/civarson/labelcraft/releases/tag/v0.5.2
 [0.5.1]: https://github.com/civarson/labelcraft/releases/tag/v0.5.1
 [0.5.0]: https://github.com/civarson/labelcraft/releases/tag/v0.5.0
 [0.4.1]: https://github.com/civarson/labelcraft/releases/tag/v0.4.1

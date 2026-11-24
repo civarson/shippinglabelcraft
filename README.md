@@ -87,6 +87,9 @@ popular shipping printers). Then print it straight from the app. Windows, macOS 
 - **Windows:** install the PeriPage driver. The app asks the driver for 100 × 150 mm
   portrait on every print. If the driver ignores custom sizes, set the default paper
   to 100 × 150 mm (or 4 × 6 in) in *Printing Preferences*.
+- **Use the SD driver.** PeriPage's "HD" drivers print at 203 × 300 dpi, which stretches
+  the image vertically; the SD driver (203 × 203 dpi) keeps barcodes on exact dots.
+  (Thanks to [peripage-bridge](https://github.com/hayek/peripage-bridge) for documenting this.)
 - **macOS:** install the PeriPage driver and add the printer. The app sends
   `media=Custom.100x150mm` with scaling off. If your driver names its 4×6 paper
   differently, enter it under *Extra CUPS options*, for example `media=<name>`.

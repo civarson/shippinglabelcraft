@@ -203,6 +203,8 @@ pub struct App {
     cursor: usize,
     /// Edits (and checks) to put back once an undo/redo has been re-processed.
     pending_restore: Option<Doc>,
+    /// The driver reported different horizontal and vertical resolutions (e.g. PeriPage "HD").
+    driver_uneven: bool,
 }
 
 impl App {
@@ -250,6 +252,7 @@ impl App {
             history: Vec::new(),
             cursor: 0,
             pending_restore: None,
+            driver_uneven: false,
         };
         app.apply_look(&cc.egui_ctx);
         // Handy for screenshots/docs: open straight onto a settings page.
@@ -462,6 +465,32 @@ impl App {
         match lang {
             RawLang::Zpl => printers::to_zpl(bitmap, 0, copies),
             RawLang::Tspl => printers::to_tspl(bitmap, self.settings.width_mm, self.settings.height_mm, 0, copies),
+        }
+    }
+
+    /// Print once through the driver into a file instead of the printer.
+    fn capture_driver(&mut self) {
+        let Some(out) = &self.output else {
+            self.toast(ToastKind::Warn, "Open a label first");
+            return;
+        };
+        if self.prefs.printer.is_empty() {
+            self.toast(ToastKind::Warn, "Pick a printer first");
+            return;
+        }
+        let safe: String = self.prefs.printer.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let Some(path) = rfd::FileDialog::new().set_file_name(format!("driver-capture-{safe}.bin")).save_file() else { return };
+        let bitmap = out.bitmap.clone();
+        match print::capture_driver_output(&self.prefs.printer, &bitmap, &self.settings, &self.prefs.cups_extra, &path) {
+            Ok(dpi) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let res = dpi.map_or(String::new(), |(x, y)| format!(" · driver at {x}×{y} dpi"));
+                self.toast(ToastKind::Ok, format!("Captured {} KB{res}. Nothing was printed.", size / 1024));
+                if dpi.is_some_and(|(x, y)| (x - y).abs() > 1.0) {
+                    self.driver_uneven = true;
+                }
+            }
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't capture: {e:#}")),
         }
     }
 
@@ -715,9 +744,14 @@ impl App {
         }
         let copies = self.prefs.copies.max(1);
         let sent = match self.raw_lang() {
-            Some(lang) => print::print_raw(&self.prefs.printer, &self.raw_job(lang, &out.bitmap, copies)),
+            Some(lang) => print::print_raw(&self.prefs.printer, &self.raw_job(lang, &out.bitmap, copies)).map(|_| None),
             None => print::print(&self.prefs.printer, &out.bitmap, &self.settings, &self.prefs.cups_extra, copies),
         };
+        let uneven = matches!(sent, Ok(Some((x, y))) if (x - y).abs() > 1.0);
+        let sent = sent.map(|_| ());
+        if uneven {
+            self.driver_uneven = true;
+        }
         match sent {
             Ok(()) => {
                 let p = self.prefs.printer.clone();
@@ -729,6 +763,9 @@ impl App {
                 }
             }
             Err(e) => self.toast(ToastKind::Error, format!("Couldn't print: {e:#}")),
+        }
+        if uneven {
+            self.toast(ToastKind::Warn, "Sent. Tip: this is an \"HD\" driver (uneven resolution); the SD driver gives sharper barcodes");
         }
     }
 
@@ -1964,6 +2001,13 @@ impl App {
                 self.save_raw(RawLang::Tspl);
             }
         });
+        section(ui, t, "Driver capture", Some("Runs one print through the printer's driver and saves the bytes it would send, without printing. Used to teach LabelCraft a printer's own commands."));
+        if ui.button("Capture what the driver sends…").clicked() {
+            self.capture_driver();
+        }
+        if self.driver_uneven {
+            note(ui, t, "This driver prints at different horizontal and vertical resolutions (PeriPage calls these \"HD\"). Barcodes are sharpest with the \"SD\" (203 × 203 dpi) driver.");
+        }
         setting_row(ui, t, "Copies", None, |ui| {
             ui.add(egui::DragValue::new(&mut self.prefs.copies).range(1..=20));
         });

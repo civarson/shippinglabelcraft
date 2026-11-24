@@ -98,6 +98,12 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
         let p = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--tspl needs a file"))?;
         std::fs::write(p, printers::to_tspl(&o.bitmap, s.width_mm, s.height_mm, s.darkness, 1))?;
     }
+    // --capture <printer> <file>: run the driver but save its output instead of printing.
+    if let Some(i) = args.iter().position(|a| a == "--capture") {
+        let (Some(printer), Some(file)) = (args.get(i + 1), args.get(i + 2)) else { anyhow::bail!("--capture needs a printer and a file") };
+        let dpi = print::capture_driver_output(printer, &o.bitmap, &s, "", std::path::Path::new(file))?;
+        println!("captured driver output to {file}{}", dpi.map_or(String::new(), |(x, y)| format!(" (driver at {x}×{y} dpi)")));
+    }
     if let Some(i) = args.iter().position(|a| a == "--print") {
         let printer = args.get(i + 1).cloned().or_else(print::default_printer).unwrap_or_default();
         print::print(&printer, &o.bitmap, &s, "", 1)?;
