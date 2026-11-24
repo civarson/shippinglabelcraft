@@ -144,6 +144,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        if: steps.tag.outputs.publish == 'true'
+        run: .github/release-notes.sh "${{ steps.tag.outputs.name }}" > notes.md && cat notes.md
       - uses: softprops/action-gh-release@v2
         if: steps.tag.outputs.publish == 'true'
         with:
@@ -151,17 +154,4 @@ jobs:
           name: LabelCraft ${{ steps.tag.outputs.name }}
           target_commitish: ${{ github.sha }}
           files: dist/*
-          generate_release_notes: true
-          body: |
-            ## Download
-            - **Windows (x64):** `labelcraft-windows-x64.zip` → `LabelCraft.exe`
-              SmartScreen will warn because the app isn't code-signed: click **More info → Run anyway**.
-              If it says `VCRUNTIME140.dll` is missing, install the Microsoft Visual C++ Redistributable (x64).
-            - **macOS (Apple Silicon and Intel):** `labelcraft-macos-universal.zip` → `LabelCraft.app`
-              Right-click → **Open** the first time (the app is ad-hoc signed).
-            - **Linux (x86_64):** `labelcraft-linux-x86_64.AppImage` (`chmod +x`, then run it), or
-              `labelcraft-linux-x86_64.tar.gz` with the plain binary. Printing uses CUPS.
-
-            ## Using it
-            Drop a label PDF or image on the window, check that the barcodes list is green, pick your printer, and click **Print label**.
-            If the size or position is off, set the printer's default paper to 100 × 150 mm (4 × 6 in) in its driver settings.
+          body_path: notes.md
