@@ -1,0 +1,22 @@
+[package]
+name = "labelcraft"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hayro = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff", "gif"] }
+flate2 = "1"
+anyhow = "1"
+png = "0.18"
+zxing-cpp = { version = "0.5.3", features = ["bundled", "image"] }
+eframe = { version = "0.37", features = ["persistence"] }
+serde = { version = "1", features = ["derive"] }
+rfd = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Storage_Xps"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

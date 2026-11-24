@@ -1,0 +1,5 @@
+target/
+*.png
+*.pdf
+!docs/*.png
+debug_*
