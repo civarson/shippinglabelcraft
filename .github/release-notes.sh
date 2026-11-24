@@ -14,6 +14,11 @@ if [ -z "$(echo "$section" | tr -d '[:space:]')" ]; then
 fi
 echo "## What's new"
 echo "$section"
+# Releases before 0.5.0 had only Windows + Apple Silicon zips.
+if [ "$(printf '%s\n0.5.0\n' "$ver" | sort -V | head -1)" != "0.5.0" ]; then
+  printf '\n## Download\nThe Windows and macOS (Apple Silicon) zips are attached below.\n\nFull history: [CHANGELOG.md](https://github.com/civarson/labelcraft/blob/main/CHANGELOG.md)\n'
+  exit 0
+fi
 cat <<'MD'
 
 ## Download

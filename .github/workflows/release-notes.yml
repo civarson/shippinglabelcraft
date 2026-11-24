@@ -1,0 +1,28 @@
+name: release notes
+
+# Keeps every GitHub Release's notes in step with its CHANGELOG.md section,
+# so fixing or expanding the changelog updates the published notes too.
+on:
+  push:
+    branches: [main]
+    paths: ["CHANGELOG.md", ".github/release-notes.sh"]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $(gh release list --limit 100 --json tagName --jq '.[].tagName'); do
+            if .github/release-notes.sh "$tag" > notes.md 2>/dev/null; then
+              gh release edit "$tag" --notes-file notes.md && echo "updated $tag"
+            else
+              echo "no CHANGELOG section for $tag, left as is"
+            fi
+          done
