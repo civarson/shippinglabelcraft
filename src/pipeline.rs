@@ -284,7 +284,7 @@ pub fn process(page: &SourcePage, s: &Settings) -> Result<Output> {
         notes.push(format!("Straightened by {skew:.1}°"));
     }
 
-    if std::env::var_os("LABELCRAFT_DEBUG").is_some() {
+    if std::env::var_os("SHIPPINGLABELCRAFT_DEBUG").is_some() {
         let _ = img.save("debug_deskewed.png");
     }
     // 3. Orientation from the main 1D barcode's reading direction. Try the image as-is,
@@ -469,7 +469,7 @@ fn render_pdf_with(pdf: &PdfPage, m: Xf, w: u32, h: u32) -> Option<GrayImage> {
         // Bilinear for embedded images: many carrier PDFs wrap a 1-bit scan of the label, and
         // nearest-neighbour at a non-integer scale is what makes small text look ragged.
         &hayro::RenderSettings {
-            force_image_interpolation: std::env::var_os("LABELCRAFT_NEAREST").is_none(),
+            force_image_interpolation: std::env::var_os("SHIPPINGLABELCRAFT_NEAREST").is_none(),
             ..Default::default()
         },
         &mut ctx,
@@ -813,7 +813,7 @@ pub fn auto_crop(src: &GrayImage, is_vector: bool) -> ((u32, u32, u32, u32), Str
         let asp = r0.2.max(r0.3) as f32 / r0.2.min(r0.3) as f32;
         let r = up(r0);
         let covers = (r.2 as f32 * r.3 as f32) / (w as f32 * h as f32);
-        if std::env::var_os("LABELCRAFT_DEBUG").is_some() {
+        if std::env::var_os("SHIPPINGLABELCRAFT_DEBUG").is_some() {
             eprintln!("blob crop {r:?} asp {asp:.2} covers {covers:.2} comps {}", comps.len());
         }
         if covers < 0.9 && (1.0..=2.2).contains(&asp) {

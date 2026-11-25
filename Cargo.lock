@@ -2273,30 +2273,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "labelcraft"
-version = "0.6.1"
-dependencies = [
- "ab_glyph",
- "anyhow",
- "arboard",
- "eframe",
- "egui_extras",
- "flate2",
- "hayro",
- "image",
- "png 0.18.1",
- "rfd",
- "rten",
- "rten-tensor",
- "serde",
- "serde_json",
- "ureq",
- "windows-sys 0.61.2",
- "winresource",
- "zxing-cpp",
-]
-
-[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4179,6 +4155,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "shippinglabelcraft"
+version = "0.7.0"
+dependencies = [
+ "ab_glyph",
+ "anyhow",
+ "arboard",
+ "eframe",
+ "egui_extras",
+ "flate2",
+ "hayro",
+ "image",
+ "png 0.18.1",
+ "rfd",
+ "rten",
+ "rten-tensor",
+ "serde",
+ "serde_json",
+ "ureq",
+ "windows-sys 0.61.2",
+ "winresource",
+ "zxing-cpp",
 ]
 
 [[package]]

@@ -159,7 +159,7 @@ pub fn badge(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) {
     ui.painter().galley(rect.center() - g.size() / 2.0, g, fg);
 }
 
-/// LabelCraft's mark: a coral tile holding a little shipping tag with barcode stripes.
+/// ShippingLabelCraft's mark: a coral tile holding a little shipping tag with barcode stripes.
 pub fn logo(p: &egui::Painter, rect: Rect, t: &Tokens) {
     let r = rect.height() * 0.28;
     p.rect_filled(rect, r, t.accent);

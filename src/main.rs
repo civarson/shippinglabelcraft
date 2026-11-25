@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Headless mode, handy for testing and scripting:
-    //   labelcraft --cli input.pdf output.png [--no-regen] [--print "Printer Name"]
+    //   shippinglabelcraft --cli input.pdf output.png [--no-regen] [--print "Printer Name"]
     if args.first().map(String::as_str) == Some("--cli") {
         return cli(&args[1..]);
     }
@@ -25,15 +25,25 @@ fn main() -> anyhow::Result<()> {
     let initial = args.first().map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("LabelCraft")
+            .with_title("ShippingLabelCraft")
             .with_inner_size([1180.0, 820.0])
             .with_min_inner_size([900.0, 620.0])
             .with_drag_and_drop(true)
             .with_icon(app_icon()),
         ..Default::default()
     };
-    eframe::run_native("LabelCraft", options, Box::new(move |cc| Ok(Box::new(gui::App::new(cc, initial)))))
+    migrate_settings();
+    eframe::run_native("ShippingLabelCraft", options, Box::new(move |cc| Ok(Box::new(gui::App::new(cc, initial)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// The app was called LabelCraft before 0.7: carry its settings over once.
+fn migrate_settings() {
+    let (Some(new), Some(old)) = (eframe::storage_dir("ShippingLabelCraft"), eframe::storage_dir("LabelCraft")) else { return };
+    let (new_file, old_file) = (new.join("app.ron"), old.join("app.ron"));
+    if !new_file.exists() && old_file.exists() && std::fs::create_dir_all(&new).is_ok() {
+        let _ = std::fs::copy(&old_file, &new_file);
+    }
 }
 
 /// The window/taskbar/dock icon.
@@ -48,7 +58,7 @@ fn app_icon() -> eframe::egui::IconData {
 fn cli(args: &[String]) -> anyhow::Result<()> {
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let (Some(input), Some(out)) = (positional.first(), positional.get(1)) else {
-        anyhow::bail!("usage: labelcraft --cli <input.pdf|png|jpg> <output.png> [--no-regen] [--no-vector] [--ocr] [--print <printer>]");
+        anyhow::bail!("usage: shippinglabelcraft --cli <input.pdf|png|jpg> <output.png> [--no-regen] [--no-vector] [--ocr] [--print <printer>]");
     };
     let mut s = pipeline::Settings::default();
     if args.iter().any(|a| a == "--no-regen") {

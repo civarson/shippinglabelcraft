@@ -83,7 +83,7 @@ pub fn calibration_page(width_mm: f32, height_mm: f32, dpi: f32, offset: (f32, f
     }
     let mut y = h as f32 / 2.0 + 14.0 * mm;
     let lines = [
-        ("LabelCraft calibration".to_string(), true),
+        ("ShippingLabelCraft calibration".to_string(), true),
         (format!("{width_mm} × {height_mm} mm · {dpi} dpi · {w} × {h} dots"), false),
         (format!("Offset now: {:+.1} mm across, {:+.1} mm down", offset.0, offset.1), false),
         ("Every edge should show its thin border line.".to_string(), false),
@@ -134,10 +134,11 @@ pub fn redacted(bitmap: &GrayImage, text: &[Rect], codes: &[Rect]) -> GrayImage 
 
 // ───────────────────────────── folder watching ─────────────────────────────
 
-/// Files LabelCraft writes itself; never pick these up as new labels.
+/// Files ShippingLabelCraft writes itself; never pick these up as new labels.
 fn ours(name: &str) -> bool {
     let n = name.to_lowercase();
-    n.starts_with("labelcraft-") || n.contains("-print.") || n.starts_with("driver-capture") || n.contains("-shareable.")
+    // "labelcraft-" is the name used before the project was renamed.
+    n.starts_with("shippinglabelcraft-") || n.starts_with("labelcraft-") || n.contains("-print.") || n.starts_with("driver-capture") || n.contains("-shareable.")
 }
 
 fn is_label_file(p: &Path) -> bool {
@@ -196,8 +197,8 @@ pub fn watch(dir: PathBuf, mut keep_going: impl FnMut() -> bool, mut found: impl
 
 /// The latest release on GitHub, if it's newer than this build: (version, page URL).
 pub fn newer_release() -> Option<(String, String)> {
-    let v: serde_json::Value = ureq::get("https://api.github.com/repos/civarson/labelcraft/releases/latest")
-        .set("User-Agent", concat!("LabelCraft/", env!("CARGO_PKG_VERSION")))
+    let v: serde_json::Value = ureq::get("https://api.github.com/repos/civarson/shippinglabelcraft/releases/latest")
+        .set("User-Agent", concat!("ShippingLabelCraft/", env!("CARGO_PKG_VERSION")))
         .set("Accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(8))
         .call()
@@ -215,8 +216,9 @@ fn version_key(v: &str) -> Vec<u64> {
 
 // ───────────────────────────── archive clean-up ─────────────────────────────
 
-/// Delete archived prints older than `days` from `dir`. Only touches files LabelCraft
-/// wrote there (named `labelcraft-….png`). Returns how many were removed.
+/// Delete archived prints older than `days` from `dir`. Only touches files ShippingLabelCraft
+/// wrote there (named `shippinglabelcraft-….png`, or `labelcraft-….png` from before the
+/// rename). Returns how many were removed.
 pub fn purge_archive(dir: &Path, days: u32) -> usize {
     if days == 0 {
         return 0;
@@ -226,7 +228,7 @@ pub fn purge_archive(dir: &Path, days: u32) -> usize {
     let mut n = 0;
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if !(name.starts_with("labelcraft-") && name.ends_with(".png")) {
+        if !((name.starts_with("shippinglabelcraft-") || name.starts_with("labelcraft-")) && name.ends_with(".png")) {
             continue;
         }
         let old = e.metadata().and_then(|m| m.modified()).map(|t| t < cutoff).unwrap_or(false);
@@ -263,7 +265,7 @@ pub fn clipboard_label() -> Result<PathBuf, String> {
 
 // ───────────────────────────── "Open with" (Windows) ─────────────────────────────
 
-/// Register LabelCraft in Explorer's "Open with" list for PDF and images (current user
+/// Register ShippingLabelCraft in Explorer's "Open with" list for PDF and images (current user
 /// only, no admin rights). The registration points at wherever the app is now.
 #[cfg(windows)]
 pub fn register_open_with(enable: bool) -> Result<(), String> {
@@ -274,24 +276,30 @@ pub fn register_open_with(enable: bool) -> Result<(), String> {
         let out = Command::new("reg").args(args).output().map_err(|e| e.to_string())?;
         if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
     };
-    let progid = r"HKCU\Software\Classes\LabelCraft.Label";
+    let progid = r"HKCU\Software\Classes\ShippingLabelCraft.Label";
     let exts = [".pdf", ".png", ".jpg", ".jpeg"];
+    // Keys from before the project was renamed (LabelCraft).
+    let _ = reg(&["delete", r"HKCU\Software\Classes\LabelCraft.Label", "/f"]);
+    let _ = reg(&["delete", r"HKCU\Software\Classes\Applications\LabelCraft.exe", "/f"]);
+    for ext in exts {
+        let _ = reg(&["delete", &format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids"), "/v", "LabelCraft.Label", "/f"]);
+    }
     if enable {
-        reg(&["add", progid, "/ve", "/d", "Shipping label (LabelCraft)", "/f"])?;
+        reg(&["add", progid, "/ve", "/d", "Shipping label (ShippingLabelCraft)", "/f"])?;
         reg(&["add", &format!(r"{progid}\DefaultIcon"), "/ve", "/d", &format!("\"{exe}\",0"), "/f"])?;
         reg(&["add", &format!(r"{progid}\shell\open\command"), "/ve", "/d", &format!("\"{exe}\" \"%1\""), "/f"])?;
-        let app = r"HKCU\Software\Classes\Applications\LabelCraft.exe";
-        reg(&["add", app, "/v", "FriendlyAppName", "/d", "LabelCraft", "/f"])?;
+        let app = r"HKCU\Software\Classes\Applications\ShippingLabelCraft.exe";
+        reg(&["add", app, "/v", "FriendlyAppName", "/d", "ShippingLabelCraft", "/f"])?;
         reg(&["add", &format!(r"{app}\shell\open\command"), "/ve", "/d", &format!("\"{exe}\" \"%1\""), "/f"])?;
         for ext in exts {
-            reg(&["add", &format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids"), "/v", "LabelCraft.Label", "/t", "REG_NONE", "/f"])?;
+            reg(&["add", &format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids"), "/v", "ShippingLabelCraft.Label", "/t", "REG_NONE", "/f"])?;
             reg(&["add", &format!(r"{app}\SupportedTypes"), "/v", ext, "/d", "", "/f"])?;
         }
     } else {
         let _ = reg(&["delete", progid, "/f"]);
-        let _ = reg(&["delete", r"HKCU\Software\Classes\Applications\LabelCraft.exe", "/f"]);
+        let _ = reg(&["delete", r"HKCU\Software\Classes\Applications\ShippingLabelCraft.exe", "/f"]);
         for ext in exts {
-            let _ = reg(&["delete", &format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids"), "/v", "LabelCraft.Label", "/f"]);
+            let _ = reg(&["delete", &format!(r"HKCU\Software\Classes\{ext}\OpenWithProgids"), "/v", "ShippingLabelCraft.Label", "/f"]);
         }
     }
     Ok(())
@@ -316,7 +324,7 @@ mod tests {
     #[test]
     fn ignores_own_files() {
         assert!(!is_label_file(Path::new("/d/label-print.pdf")));
-        assert!(!is_label_file(Path::new("/d/labelcraft-x-123.png")));
+        assert!(!is_label_file(Path::new("/d/shippinglabelcraft-x-123.png")));
         assert!(!is_label_file(Path::new("/d/notes.txt")));
         assert!(is_label_file(Path::new("/d/ebay-label-02.pdf")));
     }

@@ -57,7 +57,7 @@ mod imp {
     }
 
     pub fn print_raw(printer: &str, job: &[u8]) -> Result<()> {
-        let path = std::env::temp_dir().join(format!("labelcraft-{}.prn", std::process::id()));
+        let path = std::env::temp_dir().join(format!("shippinglabelcraft-{}.prn", std::process::id()));
         std::fs::write(&path, job).context("writing temporary print job")?;
         let out = Command::new("lp")
             .args(["-d", printer, "-t", "Shipping label", "-o", "raw"])
@@ -73,7 +73,7 @@ mod imp {
 
     pub fn print(printer: &str, bitmap: &GrayImage, s: &Settings, extra: &str, capture: Option<&std::path::Path>) -> Result<Option<(f32, f32)>> {
         let pdf = crate::pdfout::label_pdf(bitmap, s.width_mm, s.height_mm);
-        let path = std::env::temp_dir().join(format!("labelcraft-{}.pdf", std::process::id()));
+        let path = std::env::temp_dir().join(format!("shippinglabelcraft-{}.pdf", std::process::id()));
         std::fs::write(&path, pdf).context("writing temporary PDF")?;
         let media = format!("media=Custom.{}x{}mm", s.width_mm.round(), s.height_mm.round());
         if let Some(out_path) = capture {

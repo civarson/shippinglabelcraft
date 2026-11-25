@@ -1,4 +1,4 @@
-//! LabelCraft's look: "kraft paper & stamp ink".
+//! ShippingLabelCraft's look: "kraft paper & stamp ink".
 //!
 //! Every colour, radius and size the UI paints comes from [`Tokens`]; widgets never
 //! hard-code colours. Light ("Paper") and dark ("Night Shift") token sets share one layout.

@@ -1,7 +1,17 @@
 # Changelog
 
-All notable changes to LabelCraft. Each release on GitHub uses its section from this file
+All notable changes to ShippingLabelCraft (called LabelCraft before 0.7.0). Each release on GitHub uses its section from this file
 as its release notes.
+
+## [0.7.0] - 2026-11-24
+
+### Changed
+- **LabelCraft is now ShippingLabelCraft.** The repository moved to
+  [civarson/shippinglabelcraft](https://github.com/civarson/shippinglabelcraft); old links
+  redirect. Your settings, recent labels and archive carry over automatically.
+- Windows: the installer replaces the old LabelCraft shortcuts and "Open with" entries with
+  ShippingLabelCraft ones. If you used the portable zip, delete the old `LabelCraft.exe`.
+- Downloads are now named `shippinglabelcraft-…`.
 
 ## [0.6.1] - 2026-11-24
 
@@ -126,15 +136,16 @@ as its release notes.
 - First release: auto-crop, straighten and rotate shipping labels; redraw and verify every
   barcode; print directly to the PeriPage PB41 on Windows and macOS.
 
-[0.6.1]: https://github.com/civarson/labelcraft/releases/tag/v0.6.1
-[0.6.0]: https://github.com/civarson/labelcraft/releases/tag/v0.6.0
-[0.5.2]: https://github.com/civarson/labelcraft/releases/tag/v0.5.2
-[0.5.1]: https://github.com/civarson/labelcraft/releases/tag/v0.5.1
-[0.5.0]: https://github.com/civarson/labelcraft/releases/tag/v0.5.0
-[0.4.1]: https://github.com/civarson/labelcraft/releases/tag/v0.4.1
-[0.4.0]: https://github.com/civarson/labelcraft/releases/tag/v0.4.0
-[0.3.2]: https://github.com/civarson/labelcraft/releases/tag/v0.3.2
-[0.3.1]: https://github.com/civarson/labelcraft/releases/tag/v0.3.1
-[0.3.0]: https://github.com/civarson/labelcraft/releases/tag/v0.3.0
-[0.2.0]: https://github.com/civarson/labelcraft/releases/tag/v0.2.0
-[0.1.0]: https://github.com/civarson/labelcraft/releases/tag/v0.1.0
+[0.7.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.7.0
+[0.6.1]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.6.1
+[0.6.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.6.0
+[0.5.2]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.5.2
+[0.5.1]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.5.1
+[0.5.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.5.0
+[0.4.1]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.4.1
+[0.4.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.4.0
+[0.3.2]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.3.2
+[0.3.1]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.3.1
+[0.3.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.3.0
+[0.2.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.2.0
+[0.1.0]: https://github.com/civarson/shippinglabelcraft/releases/tag/v0.1.0

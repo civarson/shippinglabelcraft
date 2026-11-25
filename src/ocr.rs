@@ -710,7 +710,7 @@ fn draw_line(e: &Engine, text: &str, core: Rect, b: Rect, bitmap: &mut GrayImage
     if check.as_deref() == Some(as_read(text).as_str()) && raised_parts(&line_ink(bitmap, core, b).map(|x| x.1).unwrap_or_default()).len() == raised_parts(&parts).len() {
         Ok(shown.clone())
     } else if check.as_deref() == Some(as_read(text).as_str()) {
-        if std::env::var_os("LABELCRAFT_DEBUG").is_some() {
+        if std::env::var_os("SHIPPINGLABELCRAFT_DEBUG").is_some() {
             eprintln!("{text}: before {:?}\n  after {:?}\n  parts {:?}", raised_parts(&parts), raised_parts(&line_ink(bitmap, core, b).map(|x| x.1).unwrap_or_default()), parts);
         }
         imageops::replace(bitmap, &backup, b.0 as i64, b.1 as i64);

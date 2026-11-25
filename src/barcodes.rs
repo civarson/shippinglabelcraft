@@ -344,7 +344,7 @@ fn replace_verified(
     draw(bitmap);
     let crop = isolate(bitmap, erase, pad);
     let got = read(&crop, &[want.symbology]);
-    if std::env::var_os("LABELCRAFT_DEBUG").is_some() {
+    if std::env::var_os("SHIPPINGLABELCRAFT_DEBUG").is_some() {
         let _ = crop.save(format!("debug_verify_{:?}.png", want.symbology));
         eprintln!("want {want:?}");
         for g in &got {

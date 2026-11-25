@@ -6,7 +6,7 @@
 
 use image::GrayImage;
 
-/// A printer command language LabelCraft can send a finished bitmap in.
+/// A printer command language ShippingLabelCraft can send a finished bitmap in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RawLang {
     /// Zebra Programming Language (Zebra, and many printers' ZPL emulation).
@@ -75,7 +75,7 @@ pub fn detect(printer: &str) -> Option<&'static Profile> {
     PROFILES.iter().find(|p| p.keywords.iter().any(|k| n.contains(k)))
 }
 
-/// What LabelCraft will use for this printer: a profile (or None = custom settings)
+/// What ShippingLabelCraft will use for this printer: a profile (or None = custom settings)
 /// and its effective resolution.
 pub struct Resolved {
     pub profile: Option<&'static Profile>,
@@ -116,7 +116,7 @@ fn packed_rows(bitmap: &GrayImage, printed_is_one: bool) -> (u32, Vec<u8>) {
     (row, out)
 }
 
-/// Map LabelCraft's darkness (−20…+20) onto a 0…max scale centred on `mid`.
+/// Map ShippingLabelCraft's darkness (−20…+20) onto a 0…max scale centred on `mid`.
 fn darkness_scale(darkness: i32, mid: i32, max: i32) -> i32 {
     (mid + (darkness as f32 / 20.0 * (max - mid) as f32).round() as i32).clamp(0, max)
 }

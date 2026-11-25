@@ -40,18 +40,18 @@ jobs:
           cargo build --release --target aarch64-apple-darwin
           cargo build --release --target x86_64-apple-darwin
           mkdir -p target/release
-          lipo -create -output target/release/labelcraft \
-            target/aarch64-apple-darwin/release/labelcraft \
-            target/x86_64-apple-darwin/release/labelcraft
-          lipo -info target/release/labelcraft
+          lipo -create -output target/release/shippinglabelcraft \
+            target/aarch64-apple-darwin/release/shippinglabelcraft \
+            target/x86_64-apple-darwin/release/shippinglabelcraft
+          lipo -info target/release/shippinglabelcraft
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/labelcraft.exe "dist/LabelCraft.exe"
-          Compress-Archive -Path "dist/LabelCraft.exe" -DestinationPath labelcraft-${{ matrix.name }}.zip
+          Copy-Item target/release/shippinglabelcraft.exe "dist/ShippingLabelCraft.exe"
+          Compress-Archive -Path "dist/ShippingLabelCraft.exe" -DestinationPath shippinglabelcraft-${{ matrix.name }}.zip
 
       - name: Installer (Windows)
         if: runner.os == 'Windows'
@@ -62,17 +62,17 @@ jobs:
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y --no-progress | Out-Null
           }
-          & $iscc /Q "/DAppVersion=$version" "/DSourceExe=$PWD\target\release\labelcraft.exe" packaging\windows\labelcraft.iss
+          & $iscc /Q "/DAppVersion=$version" "/DSourceExe=$PWD\target\release\shippinglabelcraft.exe" packaging\windows\shippinglabelcraft.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Move-Item dist\labelcraft-windows-x64-setup.exe .
+          Move-Item dist\shippinglabelcraft-windows-x64-setup.exe .
 
       - name: Package (macOS .app)
         if: runner.os == 'macOS'
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          APP="dist/LabelCraft.app"
+          APP="dist/ShippingLabelCraft.app"
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp target/release/labelcraft "$APP/Contents/MacOS/labelcraft"
+          cp target/release/shippinglabelcraft "$APP/Contents/MacOS/shippinglabelcraft"
           ICONSET=dist/AppIcon.iconset
           mkdir -p $ICONSET
           for s in 16 32 128 256 512; do
@@ -84,10 +84,10 @@ jobs:
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-            <key>CFBundleName</key><string>LabelCraft</string>
-            <key>CFBundleDisplayName</key><string>LabelCraft</string>
-            <key>CFBundleIdentifier</key><string>com.civarson.labelcraft</string>
-            <key>CFBundleExecutable</key><string>labelcraft</string>
+            <key>CFBundleName</key><string>ShippingLabelCraft</string>
+            <key>CFBundleDisplayName</key><string>ShippingLabelCraft</string>
+            <key>CFBundleIdentifier</key><string>com.civarson.shippinglabelcraft</string>
+            <key>CFBundleExecutable</key><string>shippinglabelcraft</string>
             <key>CFBundleIconFile</key><string>AppIcon</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
@@ -97,34 +97,34 @@ jobs:
           </dict></plist>
           PLIST
           codesign --force --deep -s - "$APP"
-          cd dist && ditto -c -k --keepParent "LabelCraft.app" ../labelcraft-${{ matrix.name }}.zip
+          cd dist && ditto -c -k --keepParent "ShippingLabelCraft.app" ../shippinglabelcraft-${{ matrix.name }}.zip
 
       - name: Package (Linux AppImage + tar.gz)
         if: runner.os == 'Linux'
         run: |
-          strip target/release/labelcraft
+          strip target/release/shippinglabelcraft
           # Plain tarball
-          mkdir -p dist/labelcraft
-          cp target/release/labelcraft packaging/linux/labelcraft.desktop packaging/linux/labelcraft.png README.md dist/labelcraft/
-          tar -C dist -czf labelcraft-${{ matrix.name }}.tar.gz labelcraft
+          mkdir -p dist/shippinglabelcraft
+          cp target/release/shippinglabelcraft packaging/linux/shippinglabelcraft.desktop packaging/linux/shippinglabelcraft.png README.md dist/shippinglabelcraft/
+          tar -C dist -czf shippinglabelcraft-${{ matrix.name }}.tar.gz shippinglabelcraft
           # AppImage
-          APPDIR=dist/LabelCraft.AppDir
+          APPDIR=dist/ShippingLabelCraft.AppDir
           mkdir -p $APPDIR/usr/bin
-          cp target/release/labelcraft $APPDIR/usr/bin/
-          cp packaging/linux/labelcraft.desktop packaging/linux/labelcraft.png $APPDIR/
-          ln -s usr/bin/labelcraft $APPDIR/AppRun
+          cp target/release/shippinglabelcraft $APPDIR/usr/bin/
+          cp packaging/linux/shippinglabelcraft.desktop packaging/linux/shippinglabelcraft.png $APPDIR/
+          ln -s usr/bin/shippinglabelcraft $APPDIR/AppRun
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool
-          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool $APPDIR labelcraft-${{ matrix.name }}.AppImage
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool $APPDIR shippinglabelcraft-${{ matrix.name }}.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
-          name: labelcraft-${{ matrix.name }}
+          name: shippinglabelcraft-${{ matrix.name }}
           path: |
-            labelcraft-${{ matrix.name }}.zip
-            labelcraft-${{ matrix.name }}-setup.exe
-            labelcraft-${{ matrix.name }}.tar.gz
-            labelcraft-${{ matrix.name }}.AppImage
+            shippinglabelcraft-${{ matrix.name }}.zip
+            shippinglabelcraft-${{ matrix.name }}-setup.exe
+            shippinglabelcraft-${{ matrix.name }}.tar.gz
+            shippinglabelcraft-${{ matrix.name }}.AppImage
           if-no-files-found: error
 
   release:
@@ -165,7 +165,7 @@ jobs:
         if: steps.tag.outputs.publish == 'true'
         with:
           tag_name: ${{ steps.tag.outputs.name }}
-          name: LabelCraft ${{ steps.tag.outputs.name }}
+          name: ShippingLabelCraft ${{ steps.tag.outputs.name }}
           target_commitish: ${{ github.sha }}
           files: dist/*
           body_path: notes.md

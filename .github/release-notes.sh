@@ -14,27 +14,27 @@ if [ -z "$(echo "$section" | tr -d '[:space:]')" ]; then
 fi
 echo "## What's new"
 echo "$section"
-# Releases before 0.5.0 had only Windows + Apple Silicon zips.
-if [ "$(printf '%s\n0.5.0\n' "$ver" | sort -V | head -1)" != "0.5.0" ]; then
-  printf '\n## Download\nThe Windows and macOS (Apple Silicon) zips are attached below.\n\nFull history: [CHANGELOG.md](https://github.com/civarson/labelcraft/blob/main/CHANGELOG.md)\n'
+# Releases before 0.7.0 were published as LabelCraft, with differently named files.
+if [ "$(printf '%s\n0.7.0\n' "$ver" | sort -V | head -1)" != "0.7.0" ]; then
+  printf '\n## Download\nThe files for this version are attached below.\n\nFull history: [CHANGELOG.md](https://github.com/civarson/shippinglabelcraft/blob/main/CHANGELOG.md)\n'
   exit 0
 fi
 cat <<'MD'
 
 ## Download
-- **Windows (x64):** `labelcraft-windows-x64-setup.exe` installs LabelCraft for you (no admin
+- **Windows (x64):** `shippinglabelcraft-windows-x64-setup.exe` installs ShippingLabelCraft for you (no admin
   rights) with Start menu and optional desktop shortcuts; uninstall from Settings → Apps.
-  Or `labelcraft-windows-x64.zip` for the portable `LabelCraft.exe`.
+  Or `shippinglabelcraft-windows-x64.zip` for the portable `ShippingLabelCraft.exe`.
   SmartScreen will warn because neither is code-signed: click **More info → Run anyway**.
   If it says `VCRUNTIME140.dll` is missing, install the Microsoft Visual C++ Redistributable (x64).
-- **macOS (Apple Silicon and Intel):** `labelcraft-macos-universal.zip` → `LabelCraft.app`
+- **macOS (Apple Silicon and Intel):** `shippinglabelcraft-macos-universal.zip` → `ShippingLabelCraft.app`
   Right-click → **Open** the first time (the app is ad-hoc signed).
-- **Linux (x86_64):** `labelcraft-linux-x86_64.AppImage` (`chmod +x`, then run it), or
-  `labelcraft-linux-x86_64.tar.gz` with the plain binary. Printing uses CUPS.
+- **Linux (x86_64):** `shippinglabelcraft-linux-x86_64.AppImage` (`chmod +x`, then run it), or
+  `shippinglabelcraft-linux-x86_64.tar.gz` with the plain binary. Printing uses CUPS.
 
 ## Using it
 Drop a label PDF or image on the window, check that the barcodes list is green, pick your printer, and click **Print label**.
 If the size or position is off, set the printer's default paper to the label size (4 × 6 in) in its driver settings.
 
-Full history: [CHANGELOG.md](https://github.com/civarson/labelcraft/blob/main/CHANGELOG.md)
+Full history: [CHANGELOG.md](https://github.com/civarson/shippinglabelcraft/blob/main/CHANGELOG.md)
 MD

@@ -1,4 +1,4 @@
-//! The LabelCraft window: a dotted craft-mat canvas with the original and the finished
+//! The ShippingLabelCraft window: a dotted craft-mat canvas with the original and the finished
 //! label as paper sheets, and an inspector of cards on the right.
 
 use eframe::egui::{
@@ -338,7 +338,7 @@ impl App {
             extras::purge_archive(std::path::Path::new(&app.prefs.archive_dir), app.prefs.archive_keep_days);
         }
         // Handy for screenshots/docs: open straight onto a settings page.
-        if let Some(page) = std::env::var("LABELCRAFT_OPEN_SETTINGS").ok().and_then(|v| v.parse().ok()) {
+        if let Some(page) = std::env::var("SHIPPINGLABELCRAFT_OPEN_SETTINGS").ok().and_then(|v| v.parse().ok()) {
             app.settings_open = true;
             app.settings_page = page;
         }
@@ -504,8 +504,8 @@ impl App {
                     self.editing = None;
                     self.verified.clear();
                     self.verify = self.tracking_pending().map(|line| Verify { line, buf: self.line_text(line), error: None });
-                    // Handy for screenshots/docs: LABELCRAFT_DEMO_EDIT="N=text;M=text", LABELCRAFT_DEMO_OPEN=N.
-                    if let Ok(demo) = std::env::var("LABELCRAFT_DEMO_EDIT") {
+                    // Handy for screenshots/docs: SHIPPINGLABELCRAFT_DEMO_EDIT="N=text;M=text", SHIPPINGLABELCRAFT_DEMO_OPEN=N.
+                    if let Ok(demo) = std::env::var("SHIPPINGLABELCRAFT_DEMO_EDIT") {
                         for part in demo.split(';') {
                             if let Some((n, text)) = part.split_once('=').and_then(|(n, t)| Some((n.parse::<usize>().ok()?, t))) {
                                 if let Err(e) = self.commit_edit(ctx, n, text) {
@@ -517,7 +517,7 @@ impl App {
                     if let Some(doc) = self.pending_restore.take() {
                         self.restore_edits(ctx, &doc);
                     }
-                    if let Some(n) = std::env::var("LABELCRAFT_DEMO_OPEN").ok().and_then(|v| v.parse::<usize>().ok()) {
+                    if let Some(n) = std::env::var("SHIPPINGLABELCRAFT_DEMO_OPEN").ok().and_then(|v| v.parse::<usize>().ok()) {
                         self.editing = Some(Editing { line: n, buf: self.line_text(n), error: None, focus: true });
                     }
                     self.maybe_auto_print();
@@ -529,7 +529,7 @@ impl App {
                 Msg::Layout { file, items } if file == self.file_id => {
                     self.items = items;
                     self.layout_ready = true;
-                    if let Some(n) = std::env::var("LABELCRAFT_DEMO_ITEM").ok().and_then(|v| v.parse().ok()) {
+                    if let Some(n) = std::env::var("SHIPPINGLABELCRAFT_DEMO_ITEM").ok().and_then(|v| v.parse().ok()) {
                         self.select_item(n, ctx);
                     }
                     if self.items.len() > 1 && std::mem::take(&mut self.auto_batch_pending) {
@@ -664,7 +664,7 @@ impl App {
                         }
                     }
                     if let Some(dir) = &archive {
-                        let path = dir.join(format!("labelcraft-{stem}-{}-{}.png", what.replace(' ', "-"), now_secs()));
+                        let path = dir.join(format!("shippinglabelcraft-{stem}-{}-{}.png", what.replace(' ', "-"), now_secs()));
                         if let Ok(b) = pdfout::label_png(&out.bitmap, s.dpi) {
                             let _ = std::fs::write(path, b);
                         }
@@ -735,7 +735,7 @@ impl App {
         let s = &self.settings;
         let g = extras::calibration_page(s.width_mm, s.height_mm, s.dpi, (s.offset_x_mm, s.offset_y_mm));
         if save {
-            let Some(path) = rfd::FileDialog::new().set_file_name("labelcraft-calibration.png").add_filter("PNG image", &["png"]).save_file() else { return };
+            let Some(path) = rfd::FileDialog::new().set_file_name("shippinglabelcraft-calibration.png").add_filter("PNG image", &["png"]).save_file() else { return };
             match pdfout::label_png(&g, s.dpi).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
                 Ok(()) => self.toast(ToastKind::Ok, "Saved calibration page"),
                 Err(e) => self.toast(ToastKind::Error, format!("Couldn't save: {e}")),
@@ -864,7 +864,7 @@ impl App {
         if l.kind != LineKind::Tracking || self.verified.contains(&i) {
             return None;
         }
-        // Only text LabelCraft drew needs checking: original print that was kept is untouched.
+        // Only text ShippingLabelCraft drew needs checking: original print that was kept is untouched.
         if self.edits.contains_key(&i) {
             Some("You changed it.".into())
         } else if matches!(l.status, LineStatus::Kept(_)) {
@@ -1110,7 +1110,7 @@ impl App {
             .and_then(|s| std::path::Path::new(&s.name).file_stem().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "label".into());
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let path = std::path::Path::new(&self.prefs.archive_dir).join(format!("labelcraft-{stem}-{secs}.png"));
+        let path = std::path::Path::new(&self.prefs.archive_dir).join(format!("shippinglabelcraft-{stem}-{secs}.png"));
         let r = pdfout::label_png(&out.bitmap, self.settings.dpi)
             .map_err(|e| e.to_string())
             .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
@@ -1175,7 +1175,7 @@ impl App {
             let logo = Rect::from_min_size(pos2(r.left(), r.center().y - 16.0), Vec2::splat(32.0));
             widgets::logo(ui.painter(), logo, t);
             let p = ui.painter();
-            p.text(pos2(logo.right() + 11.0, r.center().y - 8.5), Align2::LEFT_CENTER, "LabelCraft", theme::semibold(16.0), t.text);
+            p.text(pos2(logo.right() + 11.0, r.center().y - 8.5), Align2::LEFT_CENTER, "ShippingLabelCraft", theme::semibold(16.0), t.text);
             p.text(pos2(logo.right() + 11.0, r.center().y + 9.0), Align2::LEFT_CENTER, "Crisp shipping labels, ready to print", theme::body(11.5), t.text_faint);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(4.0);
@@ -2446,7 +2446,7 @@ impl App {
                 self.save_raw(RawLang::Tspl);
             }
         });
-        section(ui, t, "Driver capture", Some("Runs one print through the printer's driver and saves the bytes it would send, without printing. Used to teach LabelCraft a printer's own commands."));
+        section(ui, t, "Driver capture", Some("Runs one print through the printer's driver and saves the bytes it would send, without printing. Used to teach ShippingLabelCraft a printer's own commands."));
         if ui.button("Capture what the driver sends…").clicked() {
             self.capture_driver();
         }
@@ -2458,7 +2458,7 @@ impl App {
         });
         widgets::switch(ui, t, &mut self.prefs.auto_print, "Print as soon as a label is ready", Some("Only when every barcode verified and no text needs checking"));
         section(ui, t, "Watch a folder", Some("Open new shipping labels as soon as they land, for example straight from the browser's downloads."));
-        widgets::switch(ui, t, &mut self.prefs.watch, "Open new labels from a folder automatically", Some("PDF, PNG and JPG files that appear after LabelCraft starts. Its own saved files are ignored."));
+        widgets::switch(ui, t, &mut self.prefs.watch, "Open new labels from a folder automatically", Some("PDF, PNG and JPG files that appear after ShippingLabelCraft starts. Its own saved files are ignored."));
         ui.add_enabled_ui(self.prefs.watch, |ui| {
             ui.horizontal(|ui| {
                 let shown = if self.prefs.watch_dir.is_empty() {
@@ -2535,11 +2535,11 @@ impl App {
                 }
             }
             ui.vertical(|ui| {
-                ui.label(RichText::new("LabelCraft").font(theme::semibold(18.0)).color(t.text));
+                ui.label(RichText::new("ShippingLabelCraft").font(theme::semibold(18.0)).color(t.text));
                 ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(theme::mono(12.0)).color(t.text_muted));
             });
         });
-        ui.hyperlink_to("github.com/civarson/labelcraft", "https://github.com/civarson/labelcraft");
+        ui.hyperlink_to("github.com/civarson/shippinglabelcraft", "https://github.com/civarson/shippinglabelcraft");
         section(ui, t, "Updates", None);
         widgets::switch(ui, t, &mut self.prefs.check_updates, "Tell me when a new version is out", Some("Asks GitHub once at start-up. Nothing about you is sent."));
         ui.horizontal(|ui| {
@@ -2553,11 +2553,11 @@ impl App {
             }
         });
         if cfg!(windows) {
-            section(ui, t, "Open with", Some("Adds LabelCraft to Explorer's \"Open with\" menu for PDF, PNG and JPG files (just for you, no admin rights)."));
+            section(ui, t, "Open with", Some("Adds ShippingLabelCraft to Explorer's \"Open with\" menu for PDF, PNG and JPG files (just for you, no admin rights)."));
             ui.horizontal(|ui| {
                 if ui.button("Add to \"Open with\"").clicked() {
                     match extras::register_open_with(true) {
-                        Ok(()) => self.toast(ToastKind::Ok, "Added. Right-click a label PDF → Open with → LabelCraft"),
+                        Ok(()) => self.toast(ToastKind::Ok, "Added. Right-click a label PDF → Open with → ShippingLabelCraft"),
                         Err(e) => self.toast(ToastKind::Error, format!("Couldn't add: {e}")),
                     }
                 }
@@ -2566,7 +2566,7 @@ impl App {
                     self.toast(ToastKind::Ok, "Removed from \"Open with\"");
                 }
             });
-            note(ui, t, "If you move LabelCraft.exe, add it again so Explorer finds it.");
+            note(ui, t, "If you move ShippingLabelCraft.exe, add it again so Explorer finds it.");
         }
         note(
             ui,

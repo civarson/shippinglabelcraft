@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=LabelCraft
+Name=ShippingLabelCraft
 Comment=Crisp shipping labels, ready to print
-Exec=labelcraft %f
-Icon=labelcraft
+Exec=shippinglabelcraft %f
+Icon=shippinglabelcraft
 Categories=Office;Utility;
 MimeType=application/pdf;image/png;image/jpeg;
 Terminal=false
