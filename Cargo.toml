@@ -2,6 +2,10 @@
 name = "shippinglabelcraft"
 version = "0.7.0"
 edition = "2024"
+description = "Crisp, verified shipping labels for thermal printers"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/civarson/shippinglabelcraft"
+readme = "README.md"
 
 [dependencies]
 hayro = "0.9"

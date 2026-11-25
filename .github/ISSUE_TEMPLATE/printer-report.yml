@@ -1,0 +1,54 @@
+name: Printer report
+description: Tell us how ShippingLabelCraft printed on your printer, good or bad.
+title: "Printer report: "
+labels: ["printer"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Reports like this turn "specs only" printers into tested ones.
+        Please don't attach real labels or photos showing names, addresses or tracking numbers.
+        *Share* (next to PNG/PDF) saves a blurred copy that's safe to post.
+  - type: input
+    id: model
+    attributes:
+      label: Printer model
+      placeholder: e.g. Rollo X1040, Zebra ZD421 300 dpi
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ShippingLabelCraft version and OS
+      placeholder: e.g. 0.7.0 on Windows 11
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How did you print?
+      options:
+        - Through the printer driver (default)
+        - Direct ZPL
+        - Direct TSPL
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: What came out?
+      options:
+        - Perfect
+        - Wrong size or cut off
+        - Shifted
+        - Blank
+        - Inverted (black and white swapped)
+        - Upside down
+        - Other (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Anything else, such as the driver name Windows or CUPS shows, or a photo of the printed calibration page (Settings → Label).

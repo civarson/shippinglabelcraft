@@ -148,6 +148,12 @@ source and pleasant to use. Seeing those ideas scale so well to small FOSS tools
 one has been genuinely inspiring, and I'm grateful to the people behind them for building
 in the open.
 
+## License
+
+ShippingLabelCraft is licensed under either the [MIT License](LICENSE-MIT) or the
+[Apache License 2.0](LICENSE-APACHE), at your option. Bundled fonts, icons and OCR models
+keep their own licenses, listed under Credits.
+
 ## Credits
 
 - Barcodes: [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) with [zint](https://zint.org.uk)
