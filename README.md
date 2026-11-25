@@ -148,6 +148,11 @@ source and pleasant to use. Seeing those ideas scale so well to small FOSS tools
 one has been genuinely inspiring, and I'm grateful to the people behind them for building
 in the open.
 
+## Contributors
+
+- [Chris Ivarson](https://github.com/civarson): creator and maintainer
+- [Claude](https://claude.ai) (Anthropic): co-developer; wrote much of the code with Chris
+
 ## License
 
 ShippingLabelCraft is licensed under either the [MIT License](LICENSE-MIT) or the
