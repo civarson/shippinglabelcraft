@@ -8,6 +8,7 @@ use eframe::egui::{
 use image::GrayImage;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
@@ -17,7 +18,7 @@ use crate::pipeline::{Output, Settings, Source, SourcePage};
 use crate::theme::{self, R_CARD, R_CONTROL, R_PILL, Tokens};
 use crate::widgets::{self, lerp};
 use crate::printers::{self, RawLang};
-use crate::{pdfout, print};
+use crate::{extras, pdfout, print};
 
 const MOD: &str = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl " };
 
@@ -57,10 +58,43 @@ struct Prefs {
     archive_dir: String,
     /// Printer model profile: "auto" (from the printer's name), a profile id, or "custom".
     printer_profile: String,
+    /// Open new label files that appear in a folder (Downloads by default).
+    watch: bool,
+    watch_dir: String,
+    /// Offer packing slips found beside a label as an extra label to print.
+    print_slips: bool,
+    /// Check GitHub for a newer release at start-up.
+    check_updates: bool,
+    skipped_version: String,
+    recent: Vec<Recent>,
+    /// Delete archived prints after this many days (0 = keep them).
+    archive_keep_days: u32,
     /// Direct printing in the printer's own language: "off", "auto", "zpl" or "tspl".
     raw_mode: String,
     /// Bumped when a default changes enough that saved values should be refreshed.
     rev: u32,
+}
+
+/// A recently opened label file.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+#[serde(default)]
+struct Recent {
+    path: String,
+    name: String,
+    /// Unix seconds.
+    opened: u64,
+}
+
+/// One printable thing in the open file: a label (or a packing slip) on a page.
+#[derive(Clone, PartialEq)]
+struct Item {
+    page: usize,
+    crop: (u32, u32, u32, u32),
+    slip: bool,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// 1: edge margin default 1.5 mm → 0.5 mm.
@@ -100,6 +134,13 @@ impl Default for Prefs {
             archive: false,
             archive_dir: String::new(),
             printer_profile: "auto".into(),
+            watch: false,
+            watch_dir: String::new(),
+            print_slips: true,
+            check_updates: true,
+            skipped_version: String::new(),
+            recent: Vec::new(),
+            archive_keep_days: 0,
             raw_mode: "off".into(),
             rev: PREFS_REV,
         }
@@ -110,6 +151,14 @@ enum Msg {
     Loaded { generation: u64, source: Arc<Source>, page: Arc<SourcePage> },
     Processed { generation: u64, output: Box<Output> },
     Failed { generation: u64, error: String },
+    /// Every label (and packing slip) found in file `file`.
+    Layout { file: u64, items: Vec<Item> },
+    /// A new label file appeared in the watched folder.
+    Watched(PathBuf),
+    /// A newer release exists: (version, page URL).
+    Update(String, String),
+    /// "Print all" finished.
+    BatchDone { printed: usize, skipped: Vec<String>, error: Option<String> },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -205,6 +254,18 @@ pub struct App {
     pending_restore: Option<Doc>,
     /// The driver reported different horizontal and vertical resolutions (e.g. PeriPage "HD").
     driver_uneven: bool,
+    /// Bumped on every file open, to match layout results to their file.
+    file_id: u64,
+    items: Vec<Item>,
+    layout_ready: bool,
+    current_item: usize,
+    /// Crop to apply once a different page has loaded (switching labels across pages).
+    crop_after_load: Option<(u32, u32, u32, u32)>,
+    batch_running: bool,
+    auto_batch_pending: bool,
+    watcher: Option<(PathBuf, Arc<AtomicBool>)>,
+    update: Option<(String, String)>,
+    ctx: egui::Context,
 }
 
 impl App {
@@ -253,8 +314,24 @@ impl App {
             cursor: 0,
             pending_restore: None,
             driver_uneven: false,
+            file_id: 0,
+            items: Vec::new(),
+            layout_ready: false,
+            current_item: 0,
+            crop_after_load: None,
+            batch_running: false,
+            auto_batch_pending: false,
+            watcher: None,
+            update: None,
+            ctx: cc.egui_ctx.clone(),
         };
         app.apply_look(&cc.egui_ctx);
+        if app.prefs.check_updates {
+            app.check_updates();
+        }
+        if app.prefs.archive && !app.prefs.archive_dir.is_empty() {
+            extras::purge_archive(std::path::Path::new(&app.prefs.archive_dir), app.prefs.archive_keep_days);
+        }
         // Handy for screenshots/docs: open straight onto a settings page.
         if let Some(page) = std::env::var("LABELCRAFT_OPEN_SETTINGS").ok().and_then(|v| v.parse().ok()) {
             app.settings_open = true;
@@ -343,6 +420,9 @@ impl App {
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
         self.auto_print_pending = self.prefs.auto_print;
+        self.auto_batch_pending = self.prefs.auto_print;
+        self.remember_recent(&path);
+        self.start_layout(path.clone(), ctx);
         self.settings.manual_crop = None;
         self.settings.extra_rotation = 0;
         self.settings.page = 0;
@@ -393,6 +473,9 @@ impl App {
                     self.history.clear();
                     self.cursor = 0;
                     self.pending_restore = None;
+                    if let Some(c) = self.crop_after_load.take() {
+                        self.settings.manual_crop = Some(c);
+                    }
                     self.reprocess(ctx);
                 }
                 Msg::Processed { generation, output } if generation == self.generation => {
@@ -438,11 +521,252 @@ impl App {
                     self.busy = false;
                     self.toast(ToastKind::Error, error);
                 }
+                Msg::Layout { file, items } if file == self.file_id => {
+                    self.items = items;
+                    self.layout_ready = true;
+                    if let Some(n) = std::env::var("LABELCRAFT_DEMO_ITEM").ok().and_then(|v| v.parse().ok()) {
+                        self.select_item(n, ctx);
+                    }
+                    if self.items.len() > 1 && std::mem::take(&mut self.auto_batch_pending) {
+                        self.auto_print_pending = false;
+                        self.print_all();
+                    } else {
+                        self.maybe_auto_print();
+                    }
+                }
+                Msg::Watched(path) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    self.toast(ToastKind::Ok, format!("New label: {name}"));
+                    self.open(path, ctx);
+                }
+                Msg::Update(version, url) => self.update = Some((version, url)),
+                Msg::BatchDone { printed, skipped, error } => {
+                    self.batch_running = false;
+                    match (error, skipped.is_empty()) {
+                        (Some(e), _) => self.toast(ToastKind::Error, format!("Printed {printed}, then stopped: {e}")),
+                        (None, true) => self.toast(ToastKind::Ok, format!("Printed all {printed}")),
+                        (None, false) => self.toast(ToastKind::Warn, format!("Printed {printed}; skipped {}", skipped.join("; "))),
+                    }
+                }
                 _ => {} // stale
             }
         }
         if self.dirty && !self.busy {
             self.reprocess(ctx);
+        }
+    }
+
+    // ───────────────────────────── files, queue, watching ─────────────────────────────
+
+    fn remember_recent(&mut self, path: &std::path::Path) {
+        let p = path.to_string_lossy().into_owned();
+        // Clipboard pastes are temporary files: not worth remembering.
+        if path.starts_with(std::env::temp_dir()) {
+            return;
+        }
+        self.prefs.recent.retain(|r| r.path != p);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
+        self.prefs.recent.insert(0, Recent { path: p, name, opened: now_secs() });
+        self.prefs.recent.truncate(20);
+    }
+
+    /// Find every label (and packing slip) in the file, in the background.
+    fn start_layout(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.file_id += 1;
+        self.items.clear();
+        self.layout_ready = false;
+        self.current_item = 0;
+        self.crop_after_load = None;
+        let (file, tx, ctx, slips) = (self.file_id, self.tx.clone(), ctx.clone(), self.prefs.print_slips);
+        std::thread::spawn(move || {
+            let mut items = Vec::new();
+            if let Ok(src) = Source::open(&path) {
+                for page in 0..src.page_count.min(30) {
+                    let Ok(pg) = src.render_page(page) else { continue };
+                    let l = crate::pipeline::find_labels(&pg.gray, pg.is_vector);
+                    items.extend(l.labels.into_iter().map(|crop| Item { page, crop, slip: false }));
+                    if slips {
+                        items.extend(l.slip.map(|crop| Item { page, crop, slip: true }));
+                    }
+                }
+            }
+            let _ = tx.send(Msg::Layout { file, items });
+            ctx.request_repaint();
+        });
+    }
+
+    fn select_item(&mut self, i: usize, ctx: &egui::Context) {
+        let Some(item) = self.items.get(i).cloned() else { return };
+        self.current_item = i;
+        self.editing = None;
+        self.verify = None;
+        if item.page != self.settings.page {
+            self.crop_after_load = Some(item.crop);
+            self.change_page(item.page, ctx);
+        } else {
+            self.settings.manual_crop = Some(item.crop);
+            self.dirty = true;
+        }
+    }
+
+    /// Print every label (and slip) in the file, one after another, in the background.
+    /// Labels whose barcodes don't all verify are skipped. Re-typeset text can't be reviewed
+    /// per label, so when review is on the batch prints the original text.
+    fn print_all(&mut self) {
+        let Some(src) = self.source.clone() else { return };
+        if self.prefs.printer.is_empty() {
+            self.toast(ToastKind::Warn, "Pick a printer first");
+            return;
+        }
+        let items = self.items.clone();
+        let mut settings = self.settings.clone();
+        if self.prefs.ocr && self.prefs.ocr_review {
+            settings.ocr = false;
+        }
+        settings.extra_rotation = 0;
+        let (printer, cups, copies, lang) = (self.prefs.printer.clone(), self.prefs.cups_extra.clone(), self.prefs.copies.max(1), self.raw_lang());
+        let archive = (self.prefs.archive && !self.prefs.archive_dir.is_empty()).then(|| PathBuf::from(&self.prefs.archive_dir));
+        let keep_days = self.prefs.archive_keep_days;
+        let stem = std::path::Path::new(&src.name).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "label".into());
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        self.batch_running = true;
+        self.toast(ToastKind::Ok, format!("Printing {} labels…", items.len()));
+        std::thread::spawn(move || {
+            let (mut printed, mut skipped, mut error) = (0, Vec::new(), None);
+            let mut labels_seen = 0;
+            for item in &items {
+                let what = if item.slip {
+                    "packing slip".to_string()
+                } else {
+                    labels_seen += 1;
+                    format!("label {labels_seen}")
+                };
+                let result = (|| -> anyhow::Result<bool> {
+                    let page = src.render_page(item.page)?;
+                    let mut s = settings.clone();
+                    s.page = item.page;
+                    s.manual_crop = Some(item.crop);
+                    let out = crate::pipeline::process(&page, &s)?;
+                    let verified = !out.barcodes.is_empty() && out.barcodes.iter().all(|b| !matches!(b.status, Status::Kept(_)));
+                    if !item.slip && !verified {
+                        return Ok(false);
+                    }
+                    match lang {
+                        Some(RawLang::Zpl) => print::print_raw(&printer, &printers::to_zpl(&out.bitmap, 0, copies))?,
+                        Some(RawLang::Tspl) => print::print_raw(&printer, &printers::to_tspl(&out.bitmap, s.width_mm, s.height_mm, 0, copies))?,
+                        None => {
+                            print::print(&printer, &out.bitmap, &s, &cups, copies)?;
+                        }
+                    }
+                    if let Some(dir) = &archive {
+                        let path = dir.join(format!("labelcraft-{stem}-{}-{}.png", what.replace(' ', "-"), now_secs()));
+                        if let Ok(b) = pdfout::label_png(&out.bitmap, s.dpi) {
+                            let _ = std::fs::write(path, b);
+                        }
+                        extras::purge_archive(dir, keep_days);
+                    }
+                    Ok(true)
+                })();
+                match result {
+                    Ok(true) => printed += 1,
+                    Ok(false) => skipped.push(format!("{what} (barcodes not verified)")),
+                    Err(e) => {
+                        error = Some(format!("{what}: {e:#}"));
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send(Msg::BatchDone { printed, skipped, error });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Start, stop or move the folder watcher to match the settings.
+    fn sync_watcher(&mut self) {
+        let want = self.prefs.watch.then(|| {
+            if self.prefs.watch_dir.is_empty() { extras::default_watch_dir() } else { PathBuf::from(&self.prefs.watch_dir) }
+        });
+        if want.as_ref() == self.watcher.as_ref().map(|w| &w.0) {
+            return;
+        }
+        if let Some((_, stop)) = self.watcher.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(dir) = want {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (flag, tx, ctx, d) = (stop.clone(), self.tx.clone(), self.ctx.clone(), dir.clone());
+            std::thread::spawn(move || {
+                extras::watch(
+                    d,
+                    || !flag.load(Ordering::Relaxed),
+                    |p| {
+                        let _ = tx.send(Msg::Watched(p));
+                        ctx.request_repaint();
+                    },
+                )
+            });
+            self.watcher = Some((dir, stop));
+        }
+    }
+
+    fn check_updates(&mut self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            if let Some((v, url)) = extras::newer_release() {
+                let _ = tx.send(Msg::Update(v, url));
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn paste(&mut self, ctx: &egui::Context) {
+        match extras::clipboard_label() {
+            Ok(p) => self.open(p, ctx),
+            Err(e) => self.toast(ToastKind::Warn, e),
+        }
+    }
+
+    fn print_calibration(&mut self, save: bool) {
+        let s = &self.settings;
+        let g = extras::calibration_page(s.width_mm, s.height_mm, s.dpi, (s.offset_x_mm, s.offset_y_mm));
+        if save {
+            let Some(path) = rfd::FileDialog::new().set_file_name("labelcraft-calibration.png").add_filter("PNG image", &["png"]).save_file() else { return };
+            match pdfout::label_png(&g, s.dpi).map_err(|e| e.to_string()).and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())) {
+                Ok(()) => self.toast(ToastKind::Ok, "Saved calibration page"),
+                Err(e) => self.toast(ToastKind::Error, format!("Couldn't save: {e}")),
+            }
+            return;
+        }
+        if self.prefs.printer.is_empty() {
+            self.toast(ToastKind::Warn, "Pick a printer first");
+            return;
+        }
+        let sent = match self.raw_lang() {
+            Some(lang) => print::print_raw(&self.prefs.printer, &self.raw_job(lang, &g, 1)),
+            None => print::print(&self.prefs.printer, &g, &self.settings, &self.prefs.cups_extra, 1).map(|_| ()),
+        };
+        match sent {
+            Ok(()) => self.toast(ToastKind::Ok, "Calibration page sent"),
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't print: {e:#}")),
+        }
+    }
+
+    /// Save a copy with all text and barcodes blurred, for sharing.
+    fn save_shareable(&mut self) {
+        let Some(out) = &self.output else { return };
+        let text: Vec<(u32, u32, u32, u32)> =
+            if out.ocr.is_empty() { crate::ocr::text_regions(&out.bitmap) } else { out.ocr.iter().map(|l| l.region).collect() };
+        let codes: Vec<(u32, u32, u32, u32)> = out.barcodes.iter().map(|b| b.region).collect();
+        let g = extras::redacted(&out.bitmap, &text, &codes);
+        let stem = self
+            .source
+            .as_ref()
+            .and_then(|s| std::path::Path::new(&s.name).file_stem().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "label".into());
+        let Some(path) = rfd::FileDialog::new().set_file_name(format!("{stem}-shareable.png")).add_filter("PNG image", &["png"]).save_file() else { return };
+        match g.save(&path) {
+            Ok(()) => self.toast(ToastKind::Ok, "Saved a copy with names, addresses and codes blurred"),
+            Err(e) => self.toast(ToastKind::Error, format!("Couldn't save: {e}")),
         }
     }
 
@@ -781,15 +1105,19 @@ impl App {
             .and_then(|s| std::path::Path::new(&s.name).file_stem().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "label".into());
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let path = std::path::Path::new(&self.prefs.archive_dir).join(format!("{stem}-{secs}.png"));
-        Some(
-            pdfout::label_png(&out.bitmap, self.settings.dpi)
-                .map_err(|e| e.to_string())
-                .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string())),
-        )
+        let path = std::path::Path::new(&self.prefs.archive_dir).join(format!("labelcraft-{stem}-{secs}.png"));
+        let r = pdfout::label_png(&out.bitmap, self.settings.dpi)
+            .map_err(|e| e.to_string())
+            .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
+        extras::purge_archive(std::path::Path::new(&self.prefs.archive_dir), self.prefs.archive_keep_days);
+        Some(r)
     }
 
     fn maybe_auto_print(&mut self) {
+        // Wait until we know whether the file holds several labels (then "Print all" runs).
+        if !self.layout_ready || self.output.is_none() || self.busy {
+            return;
+        }
         if !std::mem::take(&mut self.auto_print_pending) {
             return;
         }
@@ -858,6 +1186,47 @@ impl App {
                 if widgets::ghost_button(ui, t, "folder-open", "Open…", 92.0, true).on_hover_text(format!("{MOD}O")).clicked() {
                     self.browse(&ctx);
                 }
+                let recent = widgets::icon_button(ui, t, "history", "Recent labels", 34.0);
+                egui::Popup::menu(&recent).show(|ui| {
+                    ui.set_min_width(280.0);
+                    if self.prefs.recent.is_empty() {
+                        ui.label(RichText::new("Nothing opened yet").color(t.text_faint));
+                    }
+                    let mut open = None;
+                    for r in &self.prefs.recent {
+                        let ago = now_secs().saturating_sub(r.opened);
+                        let when = match ago {
+                            0..3600 => format!("{} min ago", ago / 60),
+                            3600..86400 => format!("{} h ago", ago / 3600),
+                            _ => format!("{} d ago", ago / 86400),
+                        };
+                        if ui.button(format!("{}   ·   {when}", r.name)).on_hover_text(&r.path).clicked() {
+                            open = Some(r.path.clone());
+                        }
+                    }
+                    if let Some(p) = open {
+                        let pb = PathBuf::from(&p);
+                        if pb.is_file() {
+                            self.open(pb, &ctx);
+                        } else {
+                            self.prefs.recent.retain(|r| r.path != p);
+                            self.toast(ToastKind::Warn, "That file has moved or been deleted");
+                        }
+                    }
+                });
+                if let Some((v, url)) = self.update.clone().filter(|(v, _)| *v != self.prefs.skipped_version) {
+                    ui.add_space(6.0);
+                    if widgets::icon_button(ui, t, "x", "Skip this version", 26.0).clicked() {
+                        self.prefs.skipped_version = v.clone();
+                    }
+                    if ui
+                        .add(egui::Button::new(RichText::new(format!("Update {v}")).font(theme::semibold(12.0)).color(t.on_accent)).fill(t.accent).corner_radius(R_PILL))
+                        .on_hover_text("Open the release page")
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(url));
+                    }
+                }
                 ui.add_space(10.0);
                 let redo_tip = if cfg!(target_os = "macos") { "Redo (⇧⌘Z)".to_string() } else { "Redo (Ctrl Y)".to_string() };
                 if ui.add_enabled_ui(self.can_redo(), |ui| widgets::icon_button(ui, t, "redo-2", &redo_tip, 34.0)).inner.clicked() {
@@ -898,6 +1267,10 @@ impl App {
             ui.add_space(14.0);
             ui.spacing_mut().item_spacing.y = 12.0;
 
+            // ── Labels in this file ──
+            if self.items.len() > 1 {
+                self.queue_card(ui, t);
+            }
             // ── Print ──
             widgets::card(ui, t, "printer", "Print", |_| {}, |ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
@@ -945,12 +1318,18 @@ impl App {
                     ui.label(RichText::new(format!("{model} · {} dpi · {mode}", r.dpi)).font(theme::body(11.0)).color(t.text_faint));
                 }
                 ui.horizontal(|ui| {
-                    let half = (ui.available_width() - 8.0) / 2.0;
-                    if widgets::ghost_button(ui, t, "download", "Save PNG", half, ready).clicked() {
+                    let third = (ui.available_width() - 16.0) / 3.0;
+                    if widgets::ghost_button(ui, t, "download", "PNG", third, ready).on_hover_text("Save as PNG").clicked() {
                         self.save(false);
                     }
-                    if widgets::ghost_button(ui, t, "file-down", "Save PDF", half, ready).clicked() {
+                    if widgets::ghost_button(ui, t, "file-down", "PDF", third, ready).on_hover_text("Save as PDF").clicked() {
                         self.save(true);
+                    }
+                    if widgets::ghost_button(ui, t, "eye-off", "Share", third, ready)
+                        .on_hover_text("Save a copy with names, addresses and codes blurred, for screenshots and bug reports")
+                        .clicked()
+                    {
+                        self.save_shareable();
                     }
                 });
             });
@@ -1020,6 +1399,58 @@ impl App {
             }
             ui.add_space(8.0);
         });
+    }
+
+    fn queue_card(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        let n_labels = self.items.iter().filter(|i| !i.slip).count();
+        let mut pick = None;
+        let mut all = false;
+        let ctx = ui.ctx().clone();
+        widgets::card(
+            ui,
+            t,
+            "files",
+            "In this file",
+            |ui| widgets::badge(ui, &format!("{n_labels} label{}", if n_labels == 1 { "" } else { "s" }), t.accent, t.accent_soft),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let mut n = 0;
+                for (i, item) in self.items.iter().enumerate() {
+                    let name = if item.slip {
+                        format!("Packing slip · page {}", item.page + 1)
+                    } else {
+                        n += 1;
+                        format!("Label {n} · page {}", item.page + 1)
+                    };
+                    let on = i == self.current_item;
+                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                    let hover = resp.hovered();
+                    if on || hover {
+                        ui.painter().rect_filled(r, R_CONTROL, if on { t.accent_soft } else { t.sunken });
+                    }
+                    theme::paint_icon(ui, if item.slip { "files" } else { "sticker" }, Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(15.0)), if on { t.accent } else { t.text_muted });
+                    ui.painter().text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, name, theme::medium(12.5), if on { t.text } else { t.text_muted });
+                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        pick = Some(i);
+                    }
+                }
+                ui.add_space(6.0);
+                let label = if self.batch_running { "Printing…".to_string() } else { format!("Print all {}", self.items.len()) };
+                if widgets::primary_button(ui, t, "printer", &label, None, !self.batch_running && self.source.is_some()).clicked() {
+                    all = true;
+                }
+                if self.prefs.ocr && self.prefs.ocr_review {
+                    widgets::caption(ui, t, "Print all uses the original text: re-typeset text needs a look per label.");
+                }
+                widgets::caption(ui, t, "Labels whose barcodes don't all verify are skipped.");
+            },
+        );
+        if let Some(i) = pick {
+            self.select_item(i, &ctx);
+        }
+        if all {
+            self.print_all();
+        }
     }
 
     fn text_card(&mut self, ui: &mut egui::Ui, t: &Tokens) {
@@ -1899,6 +2330,15 @@ impl App {
         setting_row(ui, t, "Vertical", None, |ui| {
             ui.add(egui::DragValue::new(&mut self.prefs.offset_y_mm).range(-10.0..=10.0).speed(0.1).suffix(" mm"));
         });
+        section(ui, t, "Calibration page", Some("A test label with a border on the outermost dots, millimetre rulers and print patterns. Print one, then adjust the offsets until every edge shows."));
+        ui.horizontal(|ui| {
+            if widgets::ghost_button(ui, t, "ruler", "Print calibration page", 210.0, true).clicked() {
+                self.print_calibration(false);
+            }
+            if widgets::ghost_button(ui, t, "download", "Save as PNG", 130.0, true).clicked() {
+                self.print_calibration(true);
+            }
+        });
     }
 
     fn page_image(&mut self, ui: &mut egui::Ui, t: &Tokens) {
@@ -2012,6 +2452,28 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.prefs.copies).range(1..=20));
         });
         widgets::switch(ui, t, &mut self.prefs.auto_print, "Print as soon as a label is ready", Some("Only when every barcode verified and no text needs checking"));
+        section(ui, t, "Watch a folder", Some("Open new shipping labels as soon as they land, for example straight from the browser's downloads."));
+        widgets::switch(ui, t, &mut self.prefs.watch, "Open new labels from a folder automatically", Some("PDF, PNG and JPG files that appear after LabelCraft starts. Its own saved files are ignored."));
+        ui.add_enabled_ui(self.prefs.watch, |ui| {
+            ui.horizontal(|ui| {
+                let shown = if self.prefs.watch_dir.is_empty() {
+                    format!("{} (default)", extras::default_watch_dir().display())
+                } else {
+                    self.prefs.watch_dir.clone()
+                };
+                ui.add(egui::Label::new(RichText::new(shown).font(theme::mono(11.5)).color(t.text_muted)).truncate());
+                if ui.button("Choose folder…").clicked()
+                    && let Some(d) = rfd::FileDialog::new().pick_folder()
+                {
+                    self.prefs.watch_dir = d.display().to_string();
+                }
+            });
+        });
+        if self.prefs.watch && self.prefs.auto_print {
+            note(ui, t, "With \"Print as soon as a label is ready\" on, a downloaded label prints by itself once every barcode is verified.");
+        }
+        section(ui, t, "Several labels in one file", None);
+        widgets::switch(ui, t, &mut self.prefs.print_slips, "Include packing slips", Some("When a page has a packing slip beside the label, list it as an extra 4 × 6 to print"));
         section(ui, t, "Keep a copy", None);
         widgets::switch(ui, t, &mut self.prefs.archive, "Save every printed label as a PNG", None);
         ui.add_enabled_ui(self.prefs.archive, |ui| {
@@ -2023,6 +2485,9 @@ impl App {
                 {
                     self.prefs.archive_dir = d.display().to_string();
                 }
+            });
+            setting_row(ui, t, "Delete copies after", Some("They contain names and addresses. 0 keeps them forever."), |ui| {
+                ui.add(egui::DragValue::new(&mut self.prefs.archive_keep_days).range(0..=365).suffix(" days"));
             });
         });
         if !cfg!(windows) {
@@ -2043,6 +2508,34 @@ impl App {
             });
         });
         ui.hyperlink_to("github.com/civarson/labelcraft", "https://github.com/civarson/labelcraft");
+        section(ui, t, "Updates", None);
+        widgets::switch(ui, t, &mut self.prefs.check_updates, "Tell me when a new version is out", Some("Asks GitHub once at start-up. Nothing about you is sent."));
+        ui.horizontal(|ui| {
+            if ui.button("Check now").clicked() {
+                self.prefs.skipped_version.clear();
+                self.check_updates();
+                self.toast(ToastKind::Ok, "Checking GitHub… a button appears at the top if there's a newer version");
+            }
+            if let Some((v, _)) = &self.update {
+                ui.label(RichText::new(format!("Version {v} is available")).font(theme::medium(12.0)).color(t.accent));
+            }
+        });
+        if cfg!(windows) {
+            section(ui, t, "Open with", Some("Adds LabelCraft to Explorer's \"Open with\" menu for PDF, PNG and JPG files (just for you, no admin rights)."));
+            ui.horizontal(|ui| {
+                if ui.button("Add to \"Open with\"").clicked() {
+                    match extras::register_open_with(true) {
+                        Ok(()) => self.toast(ToastKind::Ok, "Added. Right-click a label PDF → Open with → LabelCraft"),
+                        Err(e) => self.toast(ToastKind::Error, format!("Couldn't add: {e}")),
+                    }
+                }
+                if ui.button("Remove").clicked() {
+                    let _ = extras::register_open_with(false);
+                    self.toast(ToastKind::Ok, "Removed from \"Open with\"");
+                }
+            });
+            note(ui, t, "If you move LabelCraft.exe, add it again so Explorer finds it.");
+        }
         note(
             ui,
             t,
@@ -2061,8 +2554,8 @@ impl App {
         }
         ui.add_space(8.0);
         if widgets::ghost_button(ui, t, "refresh-cw", "Reset all settings", 180.0, true).clicked() {
-            let printer = self.prefs.printer.clone();
-            self.prefs = Prefs { printer, ..Prefs::default() };
+            let (printer, recent) = (self.prefs.printer.clone(), self.prefs.recent.clone());
+            self.prefs = Prefs { printer, recent, ..Prefs::default() };
             self.toast(ToastKind::Ok, "Settings reset");
         }
     }
@@ -2299,6 +2792,15 @@ impl eframe::App for App {
                 i.key_pressed(egui::Key::Comma) && i.modifiers.command,
             )
         });
+        self.sync_watcher();
+        // Paste a label (screenshot or copied file), unless a text box has the keyboard.
+        let paste = ctx.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                || (i.key_pressed(egui::Key::V) && i.modifiers.command)
+        });
+        if paste && !ctx.memory(|m| m.focused().is_some()) && !self.settings_open && self.editing.is_none() && self.verify.is_none() {
+            self.paste(&ctx);
+        }
         // Undo/redo, unless a text box has the keyboard (it has its own undo).
         if !ctx.memory(|m| m.focused().is_some()) && !self.settings_open {
             let (undo, redo) = ctx.input(|i| {

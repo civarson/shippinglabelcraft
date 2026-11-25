@@ -113,6 +113,40 @@ impl Read {
     }
 }
 
+/// Where text lines are on a label (expanded boxes), for redacting a shareable copy.
+pub fn text_regions(gray: &GrayImage) -> Vec<Rect> {
+    engine().map(|e| detect(e, gray).into_iter().map(|(_, b)| b).collect()).unwrap_or_default()
+}
+
+/// Draw `text` in Liberation Sans with its top-left at (x, y), `px` tall, in black.
+/// Returns the width drawn.
+pub fn draw_text(img: &mut GrayImage, x: f32, y: f32, px: f32, text: &str, bold: bool) -> f32 {
+    let Some(e) = engine() else { return 0.0 };
+    let font = if bold { &e.bold } else { &e.regular };
+    let scale = PxScale::from(px);
+    let sf = font.as_scaled(scale);
+    let (mut caret, mut prev) = (0.0f32, None);
+    for ch in text.chars() {
+        let id = sf.glyph_id(ch);
+        if let Some(p) = prev {
+            caret += sf.kern(p, id);
+        }
+        let g = id.with_scale_and_position(scale, point(x + caret, y + sf.ascent()));
+        if let Some(o) = font.outline_glyph(g) {
+            let b = o.px_bounds();
+            o.draw(|gx, gy, c| {
+                let (px_, py_) = (b.min.x as i64 + gx as i64, b.min.y as i64 + gy as i64);
+                if c >= 0.5 && px_ >= 0 && py_ >= 0 && (px_ as u32) < img.width() && (py_ as u32) < img.height() {
+                    img.put_pixel(px_ as u32, py_ as u32, Luma([0]));
+                }
+            });
+        }
+        caret += sf.h_advance(id);
+        prev = Some(id);
+    }
+    caret
+}
+
 /// Text boxes (label pixels) from the detector run on the 1× gray label.
 fn detect(e: &Engine, gray: &GrayImage) -> Vec<(Rect, Rect)> {
     let (w, h) = (gray.width().div_ceil(32) * 32, gray.height().div_ceil(32) * 32);

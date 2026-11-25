@@ -60,7 +60,16 @@ popular shipping printers). Then print it straight from the app. Windows, macOS 
 
 ## Using it
 
-- Drag a file onto the window, click the drop zone, or use **Open…** (Ctrl/⌘-O)
+- Drag a file onto the window, click the drop zone, use **Open…** (Ctrl/⌘-O), paste a
+  screenshot or a copied file (Ctrl/⌘-V), or pick one from **Recent** (clock icon)
+- **Watch a folder:** turn on *Settings → Printing → Watch a folder* and new labels in
+  Downloads (or any folder) open by themselves. Together with *Print as soon as a label is
+  ready*, buying a label is: download, and it prints, but only if every barcode verifies.
+- **Several labels in one file:** two-up sheets, multi-page PDFs and labels with a packing
+  slip beside them are listed under **In this file**. Click one to check it, or
+  **Print all**. Labels whose barcodes don't all verify are skipped.
+- **Share** saves a copy with every text line and barcode blurred, for bug reports and
+  screenshots.
 - Check the **Barcodes** list. Green means regenerated and verified. Amber means the
   original was kept, with the reason. If a barcode on the original isn't listed at all,
   it couldn't be read from the source.
@@ -71,13 +80,19 @@ popular shipping printers). Then print it straight from the app. Windows, macOS 
     Solarized Light and Dark, Tokyo Night, Rosé Pine, One Dark, GitHub Light and Dark),
     interface size, reduce motion
   - **Label:** size presets (4×6, A6, 4×4, 4×3, 4×2, 2.25×1.25 in) or custom, 203/300 dpi,
-    edge margin, and an alignment nudge if prints come out shifted
+    edge margin, an alignment nudge if prints come out shifted, and a **calibration
+    page** (border on the outermost dots, millimetre rulers, print patterns) to set it
   - **Image:** automatic crop / straighten / rotate on or off, drawing PDFs at printer
     resolution, bolder text
   - **Barcodes:** regenerate on or off, prefer thicker bars
   - **Text (OCR):** opt-in re-typesetting and in-place editing, confidence needed, review before printing
-  - **Printing:** printer, copies, print automatically when a label is ready (only if every
-    barcode verified and no text needs checking), save a PNG of every printed label
+  - **Printing:** printer and model, copies, direct printing, folder watching, packing
+    slips, print automatically when a label is ready (only if every barcode verified and no
+    text needs checking), save a PNG of every printed label and delete those after N days
+  - **About:** update notice (asks GitHub once at start-up; off switch), and on Windows
+    *Add to "Open with"* for PDF and image files
+
+<p align="center"><img src="docs/multi-label.png" alt="A two-up sheet with two shipping labels: the In this file card lists Label 1 and Label 2 with a Print all button" width="70%"></p>
 
 <p align="center"><img src="docs/settings-appearance.png" alt="The Settings window on the Appearance page, showing light and dark theme swatches" width="70%"></p>
 - Drag across the original to crop by hand; the **×** next to *Manual* goes back to automatic.
@@ -131,6 +146,9 @@ labelcraft --cli input.jpg out.png --ocr --edit "3=742 EVERGREEN TERRACE"   # re
 labelcraft --cli input.pdf out.png --no-vector  # resample the PDF instead of drawing it at printer resolution
 labelcraft --cli input.pdf out.png --dpi 300     # draw for a 300 dpi printer
 labelcraft --cli input.pdf out.png --zpl out.zpl --tspl out.tspl   # also write printer-language jobs
+labelcraft --cli input.pdf out.png --layout     # list every label / packing slip found per page
+labelcraft --cli input.pdf out.png --share shareable.png   # blurred copy for sharing
+labelcraft --cli input.pdf out.png --calibration cal.png   # calibration page at the label size
 labelcraft --cli input.pdf out.png --print "PB41"
 ```
 
@@ -184,6 +202,7 @@ The macOS app is ad-hoc signed. On first launch, right-click it and choose **Ope
 | `src/ocr.rs` | Opt-in OCR re-typesetting with double reads, barcode cross-checks and read-back verification |
 | `src/barcodes.rs` | Detection, isolated-blob second pass, exact re-encoding, verification and rollback |
 | `src/print.rs` | Windows GDI printing, CUPS `lp` on macOS/Linux, raw jobs to either |
+| `src/extras.rs` | Calibration page, shareable copy, folder watcher, update check, archive clean-up, clipboard, "Open with" |
 | `src/printers.rs` | Printer profiles, auto-detection, ZPL and TSPL job writers |
 | `src/pdfout.rs` | Exact-size 1-bit PDF and PNG with DPI metadata |
 | `src/gui.rs` | The window: canvas with the original and the label, inspector cards, toasts, shortcuts |

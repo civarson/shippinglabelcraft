@@ -9,6 +9,7 @@ mod pdfout;
 mod pipeline;
 mod print;
 mod printers;
+mod extras;
 
 use std::path::PathBuf;
 
@@ -64,6 +65,19 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
     }
     let src = pipeline::Source::open(&PathBuf::from(input))?;
     let page = src.render_page(0)?;
+    if let Some(i) = args.iter().position(|a| a == "--calibration") {
+        let p = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--calibration needs a file"))?;
+        let g = extras::calibration_page(s.width_mm, s.height_mm, s.dpi, (s.offset_x_mm, s.offset_y_mm));
+        std::fs::write(p, pdfout::label_png(&g, s.dpi)?)?;
+        println!("wrote calibration page to {p}");
+    }
+    if args.iter().any(|a| a == "--layout") {
+        for i in 0..src.page_count {
+            let pg = src.render_page(i)?;
+            let l = pipeline::find_labels(&pg.gray, pg.is_vector);
+            println!("page {}: labels {:?} slip {:?} (page {}x{})", i + 1, l.labels, l.slip, pg.gray.width(), pg.gray.height());
+        }
+    }
     let mut o = pipeline::process(&page, &s)?;
     for n in &o.notes {
         println!("note: {n}");
@@ -85,6 +99,12 @@ fn cli(args: &[String]) -> anyhow::Result<()> {
             Ok(r) => println!("edit [{n}] {text:?}: reads back {:?}, squeeze {:.2}", r.read_back, r.squeeze),
             Err(e) => println!("edit [{n}] {text:?} refused: {e}"),
         }
+    }
+    if let Some(i) = args.iter().position(|a| a == "--share") {
+        let p = args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--share needs a file"))?;
+        let text: Vec<_> = if o.ocr.is_empty() { ocr::text_regions(&o.bitmap) } else { o.ocr.iter().map(|l| l.region).collect() };
+        let codes: Vec<_> = o.barcodes.iter().map(|b| b.region).collect();
+        extras::redacted(&o.bitmap, &text, &codes).save(p)?;
     }
     let out = PathBuf::from(out);
     std::fs::write(&out, pdfout::label_png(&o.bitmap, s.dpi)?)?;

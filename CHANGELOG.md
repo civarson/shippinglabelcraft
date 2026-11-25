@@ -3,6 +3,28 @@
 All notable changes to LabelCraft. Each release on GitHub uses its section from this file
 as its release notes.
 
+## [0.6.0] - 2026-11-24
+
+### Added
+- **Watch a folder:** new labels that land in Downloads (or a folder you pick) open by
+  themselves. With *Print as soon as a label is ready* on, they print once every barcode
+  verifies. LabelCraft's own saved files are ignored.
+- **Several labels in one file:** two-up sheets, multi-page PDFs and packing slips beside
+  a label are listed under *In this file*. Check them one by one, or **Print all**; labels
+  whose barcodes don't all verify are skipped.
+- **Packing slips** can be printed as an extra 4 × 6 (on by default, in Settings).
+- **Update notice:** a button at the top when a newer release is out. Asks GitHub once at
+  start-up; can be turned off in *Settings → About*.
+- **Calibration page** (*Settings → Label*): border on the outermost dots, millimetre
+  rulers and print patterns, to set the alignment offsets and check print quality.
+- **Paste** a label screenshot or a copied file with Ctrl/⌘ V.
+- **Recent labels:** the last 20 files, from the clock button in the title bar.
+- **Archive clean-up:** archived prints can be deleted automatically after a number of days.
+  Archived files are now named `labelcraft-….png`; only those are ever deleted.
+- **Share:** saves a copy of the label with every text line and barcode blurred.
+- **Open with (Windows):** *Settings → About → Add to "Open with"* for PDF, PNG and JPG.
+- Command line: `--layout`, `--share`, `--calibration`.
+
 ## [0.5.2] - 2026-11-24
 
 ### Added
@@ -95,6 +117,7 @@ as its release notes.
 - First release: auto-crop, straighten and rotate shipping labels; redraw and verify every
   barcode; print directly to the PeriPage PB41 on Windows and macOS.
 
+[0.6.0]: https://github.com/civarson/labelcraft/releases/tag/v0.6.0
 [0.5.2]: https://github.com/civarson/labelcraft/releases/tag/v0.5.2
 [0.5.1]: https://github.com/civarson/labelcraft/releases/tag/v0.5.1
 [0.5.0]: https://github.com/civarson/labelcraft/releases/tag/v0.5.0

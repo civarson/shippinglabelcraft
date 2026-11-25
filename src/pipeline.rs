@@ -510,7 +510,7 @@ fn embolden(b: &GrayImage) -> GrayImage {
     out
 }
 
-fn shift(b: &GrayImage, dx: i64, dy: i64) -> GrayImage {
+pub(crate) fn shift(b: &GrayImage, dx: i64, dy: i64) -> GrayImage {
     let mut out = GrayImage::from_pixel(b.width(), b.height(), Luma([255]));
     imageops::overlay(&mut out, b, dx, dy);
     out
@@ -573,6 +573,78 @@ fn content_bbox(img: &GrayImage, t: u8, min_count: u32) -> Option<(u32, u32, u32
 }
 
 /// Find the label on the page. Returns the rect (source pixels) and a note on how.
+/// What's on one page: every shipping label found, plus a packing slip if there's a big
+/// block of other content left over.
+pub struct PageLayout {
+    pub labels: Vec<(u32, u32, u32, u32)>,
+    pub slip: Option<(u32, u32, u32, u32)>,
+}
+
+/// Find every label on a page (two-up sheets, a label beside its packing slip…).
+pub fn find_labels(src: &GrayImage, is_vector: bool) -> PageLayout {
+    let (w, h) = src.dimensions();
+    let full = (0, 0, w, h);
+    let (first, how) = auto_crop(src, is_vector);
+    // A label photographed or screenshotted on a dark background is one label.
+    if first == full || how.contains("dark surroundings") {
+        return PageLayout { labels: vec![first], slip: None };
+    }
+    let mut labels = vec![first];
+    let mut masked = src.clone();
+    let blank = |img: &mut GrayImage, r: (u32, u32, u32, u32)| {
+        let pad = (w.max(h) / 100).max(2);
+        let (x0, y0) = (r.0.saturating_sub(pad), r.1.saturating_sub(pad));
+        let (x1, y1) = ((r.0 + r.2 + pad).min(w), (r.1 + r.3 + pad).min(h));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                img.put_pixel(x, y, Luma([255]));
+            }
+        }
+    };
+    blank(&mut masked, first);
+    let area = |r: (u32, u32, u32, u32)| r.2 as f32 * r.3 as f32;
+    let label_like = |r: (u32, u32, u32, u32)| {
+        let asp = r.2.max(r.3) as f32 / r.2.min(r.3).max(1) as f32;
+        (1.0..=2.2).contains(&asp)
+    };
+    let mut slip = None;
+    for _ in 0..5 {
+        let (r, _) = auto_crop(&masked, is_vector);
+        if r == full || area(r) < area(first) * 0.15 {
+            break;
+        }
+        let ratio = area(r) / area(first);
+        if label_like(r) && (0.6..=1.6).contains(&ratio) {
+            labels.push(r);
+            blank(&mut masked, r);
+            continue;
+        }
+        // A sizeable leftover block of content: most likely a packing slip.
+        if slip.is_none() && area(r) > area(full) * 0.04 {
+            // Widen to all ink in that band (box outlines and rules get dropped by the
+            // block finder), labels excluded since they're blanked out.
+            let pad = h / 50;
+            let (y0, y1) = (r.1.saturating_sub(pad), (r.1 + r.3 + pad).min(h));
+            let (mut bx0, mut by0, mut bx1, mut by1) = (u32::MAX, u32::MAX, 0, 0);
+            for y in y0..y1 {
+                for x in 0..w {
+                    if masked.get_pixel(x, y)[0] < 128 {
+                        bx0 = bx0.min(x);
+                        by0 = by0.min(y);
+                        bx1 = bx1.max(x);
+                        by1 = by1.max(y);
+                    }
+                }
+            }
+            slip = Some(if bx1 > bx0 { (bx0, by0, bx1 - bx0 + 1, by1 - by0 + 1) } else { r });
+        }
+        break;
+    }
+    // Reading order: top to bottom, then left to right.
+    labels.sort_by_key(|r| (r.1 / (h / 8).max(1), r.0));
+    PageLayout { labels, slip }
+}
+
 pub fn auto_crop(src: &GrayImage, is_vector: bool) -> ((u32, u32, u32, u32), String) {
     let (w, h) = src.dimensions();
     let aspect = w.max(h) as f32 / w.min(h) as f32;
