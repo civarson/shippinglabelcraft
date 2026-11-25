@@ -266,6 +266,9 @@ pub struct App {
     watcher: Option<(PathBuf, Arc<AtomicBool>)>,
     update: Option<(String, String)>,
     ctx: egui::Context,
+    /// Easter egg: clicks on the About icon, and whether the tide pool is showing.
+    ripples: u8,
+    tidepool: bool,
 }
 
 impl App {
@@ -324,6 +327,8 @@ impl App {
             watcher: None,
             update: None,
             ctx: cc.egui_ctx.clone(),
+            ripples: 0,
+            tidepool: false,
         };
         app.apply_look(&cc.egui_ctx);
         if app.prefs.check_updates {
@@ -2498,10 +2503,37 @@ impl App {
         }
     }
 
+    /// Easter egg.
+    fn tide(&mut self, ctx: &egui::Context, t: &Tokens) {
+        if !self.tidepool {
+            return;
+        }
+        let r = egui::Modal::new(egui::Id::unique("tide"))
+            .backdrop_color(Color32::from_black_alpha(120))
+            .frame(egui::Frame::new().fill(t.surface).corner_radius(CornerRadius::same(R_CARD + 4)).inner_margin(egui::Margin::same(12)))
+            .show(ctx, |ui| {
+                ui.add(egui::Image::new(egui::include_image!("../assets/misc/tidepool.svg")).fit_to_exact_size(vec2(416.0, 320.0)));
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("blub.").font(theme::mono(13.0)).color(t.text_muted));
+                });
+            });
+        if r.should_close() || ctx.input(|i| i.pointer.any_click()) && r.response.clicked_elsewhere() {
+            self.tidepool = false;
+        }
+    }
+
     fn page_about(&mut self, ui: &mut egui::Ui, t: &Tokens) {
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
+            let (r, resp) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
             widgets::logo(ui.painter(), r, t);
+            // Easter egg.
+            if resp.clicked() {
+                self.ripples += 1;
+                if self.ripples >= 10 {
+                    self.ripples = 0;
+                    self.tidepool = true;
+                }
+            }
             ui.vertical(|ui| {
                 ui.label(RichText::new("LabelCraft").font(theme::semibold(18.0)).color(t.text));
                 ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).font(theme::mono(12.0)).color(t.text_muted));
@@ -2763,6 +2795,7 @@ impl eframe::App for App {
 
         self.settings_window(&ctx, &t);
         self.verify_dialog(&ctx, &t);
+        self.tide(&ctx, &t);
 
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
             egui::Area::new(egui::Id::unique("drop_overlay"))
