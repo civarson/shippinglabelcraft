@@ -11,6 +11,19 @@ popular shipping printers). Then print it straight from the app. Windows, macOS 
 
 *LabelCraft 0.3 in the Paper and Night Shift themes, shown with a made-up test label. It follows your system setting, or pick a mode with the sun / monitor / moon switch and choose from 15 themes in Settings.*
 
+## Download
+
+Get the latest from [Releases](https://github.com/civarson/labelcraft/releases/latest):
+
+- **Windows:** `labelcraft-windows-x64-setup.exe` installs LabelCraft just for you (no admin
+  rights) into `AppData\Local\Programs\LabelCraft`, with a Start menu shortcut and, if you
+  like, a desktop shortcut and "Open with" for PDFs and images. Prefer no installer? The
+  `.zip` has the portable `LabelCraft.exe`. Windows SmartScreen warns about both because
+  they aren't code-signed: **More info → Run anyway**.
+- **macOS (Apple Silicon and Intel):** `labelcraft-macos-universal.zip`. Right-click
+  `LabelCraft.app` and choose **Open** the first time.
+- **Linux (x86_64):** the `.AppImage` (`chmod +x` and run) or the `.tar.gz`.
+
 ## What it does
 
 1. **Finds the label on the page.** It handles letter-size PDFs with instructions, labels
@@ -177,7 +190,8 @@ cargo build --release
 
 The first build takes a few minutes (C++).
 
-**Releases:** every push to `main` builds `LabelCraft.exe` (Windows x64), a universal
+**Releases:** every push to `main` builds `LabelCraft.exe` (Windows x64, as an installer
+and a portable zip), a universal
 `LabelCraft.app` (Apple Silicon and Intel) and Linux x86_64 as an AppImage and a `.tar.gz`
 on GitHub Actions. When the `version` in `Cargo.toml` doesn't have a release yet, the same
 run publishes one (`v<version>`) with all of them attached, so to ship a new version, bump

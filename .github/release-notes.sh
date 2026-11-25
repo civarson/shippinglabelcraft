@@ -22,8 +22,10 @@ fi
 cat <<'MD'
 
 ## Download
-- **Windows (x64):** `labelcraft-windows-x64.zip` → `LabelCraft.exe`
-  SmartScreen will warn because the app isn't code-signed: click **More info → Run anyway**.
+- **Windows (x64):** `labelcraft-windows-x64-setup.exe` installs LabelCraft for you (no admin
+  rights) with Start menu and optional desktop shortcuts; uninstall from Settings → Apps.
+  Or `labelcraft-windows-x64.zip` for the portable `LabelCraft.exe`.
+  SmartScreen will warn because neither is code-signed: click **More info → Run anyway**.
   If it says `VCRUNTIME140.dll` is missing, install the Microsoft Visual C++ Redistributable (x64).
 - **macOS (Apple Silicon and Intel):** `labelcraft-macos-universal.zip` → `LabelCraft.app`
   Right-click → **Open** the first time (the app is ad-hoc signed).

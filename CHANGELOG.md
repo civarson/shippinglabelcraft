@@ -3,6 +3,15 @@
 All notable changes to LabelCraft. Each release on GitHub uses its section from this file
 as its release notes.
 
+## [0.6.1] - 2026-11-24
+
+### Added
+- **Windows installer** (`labelcraft-windows-x64-setup.exe`): installs into your user's
+  AppData (`%LOCALAPPDATA%\Programs\LabelCraft`) without admin rights, adds a Start menu
+  shortcut, and optionally a desktop shortcut and an "Open with" entry for PDF and image
+  files. Uninstall from *Settings → Apps*; your LabelCraft settings are kept. The portable
+  zip is still available.
+
 ## [0.6.0] - 2026-11-24
 
 ### Added
@@ -117,6 +126,7 @@ as its release notes.
 - First release: auto-crop, straighten and rotate shipping labels; redraw and verify every
   barcode; print directly to the PeriPage PB41 on Windows and macOS.
 
+[0.6.1]: https://github.com/civarson/labelcraft/releases/tag/v0.6.1
 [0.6.0]: https://github.com/civarson/labelcraft/releases/tag/v0.6.0
 [0.5.2]: https://github.com/civarson/labelcraft/releases/tag/v0.5.2
 [0.5.1]: https://github.com/civarson/labelcraft/releases/tag/v0.5.1
